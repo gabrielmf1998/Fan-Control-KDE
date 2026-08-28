@@ -1,0 +1,603 @@
+#!/usr/bin/env python3
+"""Fan Tray -- tray icon only. No windows, no dialogs.
+
+Speed is picked from a level list in the menu. A tray menu is exported over
+DBusMenu and drawn by the panel, and that protocol carries only labels,
+checkmarks, separators and submenus -- an embedded slider has no
+representation in it, which is why one cannot be used here.
+
+The icon is painted at runtime rather than loaded from a file, so it spins and
+follows the panel's foreground colour. It spins only while every fan is at 100%.
+"""
+import configparser
+import datetime
+import json
+import math
+import os
+import subprocess
+import sys
+import time
+
+from PySide6.QtCore import QPointF, QProcess, QRectF, Qt, QTimer
+from PySide6.QtGui import (
+    QAction, QActionGroup, QBrush, QColor, QIcon, QPainter, QPainterPath,
+    QPen, QPixmap, QPolygonF,
+)
+from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
+
+HELPER = "/usr/libexec/fan-tray-helper"
+CONFIG = os.path.expanduser("~/.config/fan-tray/tray.conf")
+LOG = os.path.expanduser("~/.cache/fan-tray.log")
+
+
+def log(msg):
+    """Every click is recorded, so a click that appears to do nothing can be
+    told apart from a click that never reached the app."""
+    try:
+        os.makedirs(os.path.dirname(LOG), exist_ok=True)
+        with open(LOG, "a") as fh:
+            fh.write("%s  %s\n" % (datetime.datetime.now().strftime("%H:%M:%S"), msg))
+    except OSError:
+        pass
+SIZE = 48            # the panel draws it at ~22 px; 48 is plenty and halves
+                     # the pixmap that has to travel over D-Bus every frame
+FPS_MS = 45          # ~22 fps. Every frame is pushed to the panel over D-Bus,
+                     # which is why the frame cache, the smaller pixmap and the
+                     # non-blocking poll below all matter at this rate.
+STEP_MIN = 1.6       # degrees per tick when barely turning
+FRAMES = 72          # pre-rendered rotation steps, 5 degrees apart
+STEP_MAX = 20.0      # degrees per tick at full speed
+
+
+# --------------------------------------------------------------------- helper
+def helper(*args, as_root=True):
+    cmd = (["pkexec", HELPER] if as_root else [HELPER]) + list(args)
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=40)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def read_status():
+    res = helper("status", as_root=False)
+    if res and res.returncode == 0:
+        try:
+            return json.loads(res.stdout)
+        except ValueError:
+            pass
+    return None
+
+
+def boot_enabled():
+    res = helper("boot", "status", as_root=False)
+    return bool(res and res.stdout.strip() == "enabled")
+
+
+# ------------------------------------------------------------------- painting
+def _blades(p, r, count, span, skew, hub, colour):
+    """Filled blades: fat shapes, because thin strokes vanish at 22 px."""
+    outer = QRectF(-r, -r, 2 * r, 2 * r)
+    inner = QRectF(-hub, -hub, 2 * hub, 2 * hub)
+    p.setBrush(QBrush(colour))
+    p.setPen(Qt.NoPen)
+    for i in range(count):
+        p.save()
+        p.rotate(i * 360.0 / count)
+        path = QPainterPath()
+        path.arcMoveTo(outer, -span / 2.0)
+        path.arcTo(outer, -span / 2.0, span)
+        path.arcTo(inner, span / 2.0 + skew, -(span + skew))
+        path.closeSubpath()
+        p.drawPath(path)
+        p.restore()
+
+
+def _hub(p, r, colour, k=0.20):
+    p.setPen(Qt.NoPen)
+    p.setBrush(QBrush(colour))
+    p.drawEllipse(QPointF(0, 0), r * k, r * k)
+
+
+def draw_classic(p, r, colour):
+    _blades(p, r, 3, 58, 34, r * 0.20, colour)
+    _hub(p, r, colour, 0.22)
+
+
+def draw_turbine(p, r, colour):
+    p.setBrush(Qt.NoBrush)
+    p.setPen(QPen(colour, r * 0.11))
+    p.drawEllipse(QPointF(0, 0), r * 0.97, r * 0.97)
+    _blades(p, r * 0.84, 7, 40, 22, r * 0.24, colour)
+    _hub(p, r, colour, 0.26)
+
+
+def draw_pinwheel(p, r, colour):
+    _blades(p, r, 4, 62, 46, r * 0.16, colour)
+    _hub(p, r, colour, 0.18)
+
+
+def draw_casefan(p, r, colour, angle):
+    pen = QPen(colour, r * 0.16)
+    pen.setJoinStyle(Qt.MiterJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+    p.drawRoundedRect(QRectF(-r, -r, r * 2, r * 2), r * 0.24, r * 0.24)
+    p.save()
+    p.rotate(angle)
+    _blades(p, r * 0.72, 5, 50, 30, r * 0.18, colour)
+    _hub(p, r, colour, 0.20)
+    p.restore()
+
+
+def draw_blower(p, r, colour):
+    """Squirrel cage: a ring packed with short vanes."""
+    p.setBrush(Qt.NoBrush)
+    p.setPen(QPen(colour, r * 0.10))
+    p.drawEllipse(QPointF(0, 0), r * 0.96, r * 0.96)
+    p.setPen(QPen(colour, r * 0.115, Qt.SolidLine, Qt.RoundCap))
+    for i in range(14):
+        p.save()
+        p.rotate(i * 360.0 / 14)
+        p.drawLine(QPointF(r * 0.52, 0), QPointF(r * 0.84, -r * 0.20))
+        p.restore()
+    _hub(p, r, colour, 0.30)
+
+
+def draw_ceiling(p, r, colour):
+    """Four long slim blades, like a ceiling fan."""
+    p.setPen(Qt.NoPen)
+    p.setBrush(QBrush(colour))
+    for i in range(4):
+        p.save()
+        p.rotate(i * 90.0 + 12)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(r * 0.24, -r * 0.19, r * 0.76, r * 0.38),
+                            r * 0.15, r * 0.15)
+        p.drawPath(path)
+        p.restore()
+    _hub(p, r, colour, 0.26)
+
+
+def draw_impeller(p, r, colour):
+    """Centrifugal impeller: vanes curving out of the hub."""
+    p.setPen(QPen(colour, r * 0.20, Qt.SolidLine, Qt.RoundCap))
+    p.setBrush(Qt.NoBrush)
+    for i in range(6):
+        p.save()
+        p.rotate(i * 60.0)
+        path = QPainterPath()
+        path.moveTo(r * 0.24, 0)
+        path.cubicTo(r * 0.60, 0, r * 0.80, -r * 0.20, r * 0.92, -r * 0.52)
+        p.drawPath(path)
+        p.restore()
+    _hub(p, r, colour, 0.24)
+
+
+def draw_hexfan(p, r, colour, angle):
+    """Hexagonal housing, spinning rotor inside."""
+    pen = QPen(colour, r * 0.15)
+    pen.setJoinStyle(Qt.MiterJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+    poly = QPolygonF([
+        QPointF(r * math.cos(math.radians(a)), r * math.sin(math.radians(a)))
+        for a in range(0, 360, 60)
+    ])
+    p.drawPolygon(poly)
+    p.save()
+    p.rotate(angle)
+    _blades(p, r * 0.66, 6, 44, 26, r * 0.18, colour)
+    _hub(p, r, colour, 0.20)
+    p.restore()
+
+
+def draw_spiral(p, r, colour):
+    """Three long swept arms -- reads well even very small."""
+    p.setPen(Qt.NoPen)
+    p.setBrush(QBrush(colour))
+    for i in range(3):
+        p.save()
+        p.rotate(i * 120.0)
+        path = QPainterPath()
+        path.moveTo(0, -r * 0.17)
+        path.cubicTo(r * 0.55, -r * 0.44, r * 0.92, -r * 0.30, r * 0.99, r * 0.06)
+        path.cubicTo(r * 0.70, -r * 0.02, r * 0.42, r * 0.14, 0, r * 0.19)
+        path.closeSubpath()
+        p.drawPath(path)
+        p.restore()
+    _hub(p, r, colour, 0.21)
+
+
+STYLES = [
+    ("classic",  "Classic"),
+    ("turbine",  "Turbine"),
+    ("pinwheel", "Pinwheel"),
+    ("casefan",  "Case fan"),
+    ("blower",   "Blower"),
+    ("ceiling",  "Ceiling"),
+    ("impeller", "Impeller"),
+    ("hexfan",   "Hex frame"),
+    ("spiral",   "Spiral"),
+]
+
+_ROTORS = {
+    "classic": draw_classic, "turbine": draw_turbine, "pinwheel": draw_pinwheel,
+    "blower": draw_blower, "ceiling": draw_ceiling, "impeller": draw_impeller,
+    "spiral": draw_spiral,
+}
+_FRAMED = {"casefan": draw_casefan, "hexfan": draw_hexfan}
+
+
+_ICON_CACHE = {}
+
+
+def frame_icon(style, frame, colour):
+    """Icons are pre-rendered once per style and reused. Painting was never
+    the bottleneck, but rebuilding a QIcon every tick also meant a brand new
+    pixmap crossing D-Bus each time."""
+    key = (style, frame % FRAMES)
+    hit = _ICON_CACHE.get(key)
+    if hit is None:
+        hit = make_icon(style, (frame % FRAMES) * (360.0 / FRAMES), colour)
+        _ICON_CACHE[key] = hit
+    return hit
+
+
+def make_icon(style, angle, colour):
+    pm = QPixmap(SIZE, SIZE)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    p.translate(SIZE / 2.0, SIZE / 2.0)
+    r = SIZE * 0.42
+
+    if style in _FRAMED:
+        _FRAMED[style](p, r, colour, angle)
+    else:
+        p.save()
+        p.rotate(angle)
+        _ROTORS.get(style, draw_classic)(p, r, colour)
+        p.restore()
+
+    p.end()
+    return QIcon(pm)
+
+
+# --------------------------------------------------------------------- config
+def cfg_load():
+    cp = configparser.ConfigParser()
+    try:
+        cp.read(CONFIG)
+        style = cp.get("tray", "style", fallback="classic")
+    except configparser.Error:
+        style = "classic"
+    return style if style in dict(STYLES) else "classic"
+
+
+def cfg_save(style):
+    os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
+    cp = configparser.ConfigParser()
+    cp["tray"] = {"style": style}
+    with open(CONFIG, "w") as fh:
+        cp.write(fh)
+
+
+# ---------------------------------------------------------------- speed menu
+LEVELS = [100, 90, 80, 70, 60, 50, 40, 30, 20, 10, 0]
+
+
+def levels_for(lo, hi):
+    """Offer the full range. The NVIDIA API only accepts roughly 30-100, but
+    the helper clamps to that internally and the card's zero-RPM mode still
+    stops the fans at the low end -- so 0% is a real outcome, not a dead entry.
+    """
+    return list(LEVELS)
+
+
+class SpeedMenu:
+    """A submenu of levels.
+
+    No checkmarks: Qt's DBusMenu exporter propagates a tick to the panel but
+    not an untick, so plasmashell accumulates them and several entries show as
+    selected at once. The submenu title carries the current value instead --
+    setTitle triggers a layout update, which the panel always honours.
+    """
+
+    def __init__(self, parent, title, on_apply):
+        self.on_apply = on_apply
+        self.title_base = title
+        self.current = 100
+        self.menu = parent.addMenu(title)
+
+        self.up = QAction("Increase 5%", self.menu)
+        self.up.triggered.connect(lambda: self.nudge(+5))
+        self.menu.addAction(self.up)
+        self.down = QAction("Decrease 5%", self.menu)
+        self.down.triggered.connect(lambda: self.nudge(-5))
+        self.menu.addAction(self.down)
+        self.menu.addSeparator()
+
+        self.auto = QAction("Auto", self.menu)
+        self.auto.triggered.connect(lambda: self.on_apply("auto"))
+        self.menu.addAction(self.auto)
+        self.sep = self.menu.addSeparator()
+
+        self.range = (0, 100)
+        self.level_acts = []
+        self._fill_levels()
+
+    def _fill_levels(self):
+        for act in self.level_acts:
+            self.menu.removeAction(act)
+        self.level_acts = []
+        lo, hi = self.range
+        for pct in levels_for(lo, hi):
+            act = QAction("%d%%" % pct, self.menu)
+            act.triggered.connect(lambda _=False, v=pct: self.on_apply(str(v)))
+            self.menu.addAction(act)
+            self.level_acts.append(act)
+
+    def set_range(self, lo, hi):
+        if (lo, hi) != self.range:
+            self.range = (lo, hi)
+            self._fill_levels()
+
+    def nudge(self, delta):
+        lo, hi = self.range
+        self.on_apply(str(max(lo, min(hi, self.current + delta))))
+
+    def show_value(self, percent, mode):
+        self.current = percent
+        label = "Auto" if mode == "auto" else "%d%%" % percent
+        title = "%s   %s" % (self.title_base, label)
+        if self.menu.title() != title:
+            self.menu.setTitle(title)
+
+
+# ----------------------------------------------------------------------- tray
+class Tray:
+    def __init__(self, app):
+        self.app = app
+        self.style = cfg_load()
+        self.angle = 0.0
+        self.spinning = False
+        self.step = 0.0
+        self.frame = 0.0
+        # self-calibrating: the fastest rpm ever seen becomes the reference,
+        # so CPU (~1550) and GPU (~3000) are each scaled against themselves
+        self._rpm_max = {"cpu": 1.0, "gpu": 1.0}
+        self._last_seen = None
+        self.colour = QColor(app.palette().windowText().color())
+
+        self.tray = QSystemTrayIcon()
+        self.tray.setToolTip("Fan Control")
+        self._build_menu()
+        self.tray.setIcon(make_icon(self.style, 0, self.colour))
+        self.tray.show()
+
+        self.spin = QTimer()
+        self.spin.timeout.connect(self._tick)
+        self.boot_on = boot_enabled()        # muda so quando o usuario alterna
+        self.proc = QProcess()
+        self.proc.finished.connect(self._status_ready)
+        self.poll = QTimer()
+        self.poll.timeout.connect(self.poll_now)
+        self.poll.start(4000)
+        self.poll_now()
+
+    def _build_menu(self):
+        m = QMenu()
+
+        self.cpu_line = QAction("Reading fans...", m)
+        self.cpu_line.setEnabled(False)
+        m.addAction(self.cpu_line)
+        self.cpu_menu = SpeedMenu(m, "CPU / case", lambda v: self.set_speed("cpu", v))
+
+        m.addSeparator()
+
+        self.gpu_line = QAction("...", m)
+        self.gpu_line.setEnabled(False)
+        m.addAction(self.gpu_line)
+        self.gpu_menu = SpeedMenu(m, "GPU", lambda v: self.set_speed("gpu", v))
+
+        m.addSeparator()
+        icons = m.addMenu("Icon")
+        self.icon_group = QActionGroup(icons)
+        self.icon_group.setExclusive(True)
+        for key, label in STYLES:
+            act = QAction(label, icons, checkable=True)
+            act.setChecked(key == self.style)
+            act.setIcon(make_icon(key, 0, self.colour))
+            act.triggered.connect(lambda _=False, k=key: self.set_style(k))
+            self.icon_group.addAction(act)
+            icons.addAction(act)
+
+        m.addSeparator()
+        self.boot_act = QAction("Keep speeds after reboot", m, checkable=True)
+        self.boot_act.triggered.connect(self.toggle_boot)
+        m.addAction(self.boot_act)
+
+        m.addSeparator()
+        m.addAction(QAction("Quit", m, triggered=self.app.quit))
+        self.menu = m
+        self.tray.setContextMenu(m)
+
+    # ---- animation
+    def _tick(self):
+        prev = int(self.frame)
+        self.frame = (self.frame + self.step / (360.0 / FRAMES)) % FRAMES
+        if int(self.frame) != prev:          # only push when the frame changes
+            self.tray.setIcon(frame_icon(self.style, int(self.frame), self.colour))
+
+    def _spin_factor(self, rpms):
+        """0.0 when every fan reads zero, 1.0 at the fastest speed seen.
+
+        Driven by measured rpm, not by the percentage we asked for: the
+        motherboard fans sit at ~530 rpm even at 0% duty, so by percentage they
+        would look stopped while they are plainly still turning.
+        """
+        vals = []
+        for key, group in rpms.items():
+            group = [r for r in group if r is not None]
+            if not group:
+                continue
+            top = max(group)
+            if top > self._rpm_max[key]:
+                self._rpm_max[key] = float(top)
+            vals.append(top / self._rpm_max[key])
+        if not vals:
+            return 0.0
+        return max(0.0, min(1.0, sum(vals) / len(vals)))
+
+    def _set_spinning(self, factor):
+        if factor <= 0.0:
+            self.step = 0.0
+            if self.spinning:
+                self.spinning = False
+                self.spin.stop()
+                self.frame = 0.0
+                self.tray.setIcon(frame_icon(self.style, 0, self.colour))
+            return
+        self.step = STEP_MIN + factor * (STEP_MAX - STEP_MIN)
+        if not self.spinning:
+            self.spinning = True
+            self.spin.start(FPS_MS)
+
+    # ---- actions
+    def set_style(self, key):
+        self.style = key
+        cfg_save(key)
+        self.tray.setIcon(frame_icon(key, int(self.frame) if self.spinning else 0, self.colour))
+
+    def _run(self, *args):
+        res = helper(*args)
+        if res is None or res.returncode != 0:
+            msg = (res.stderr or "").strip() if res else "The helper did not respond."
+            self.tray.showMessage("Fan Control", msg or "Could not change the fan speed.",
+                                  QSystemTrayIcon.Warning)
+        self.refresh()
+
+    def set_speed(self, group, value):
+        label = "CPU / case" if group == "cpu" else "GPU"
+        log("CLICK  %s -> %s" % (group, value))
+        t0 = time.monotonic()
+        res = helper("set", group, value)
+        dt = time.monotonic() - t0
+
+        if res is None:
+            log("       FAILED: helper never answered (%.1fs)" % dt)
+            self.tray.showMessage("Fan Control", "The helper did not respond.",
+                                  QSystemTrayIcon.Warning)
+        elif res.returncode != 0:
+            err = (res.stderr or "").strip()
+            log("       exit=%d (%.1fs) stderr=%s" % (res.returncode, dt, err[:160]))
+            self.tray.showMessage("Fan Control", err or "Could not change the fan speed.",
+                                  QSystemTrayIcon.Warning)
+        else:
+            note = (res.stdout or "").strip()
+            log("       ok (%.1fs)%s" % (dt, "  " + note if note else ""))
+            shown = "Auto" if value == "auto" else "%s%%" % value
+            body = note if note else "%s set to %s" % (label, shown)
+            self.tray.showMessage("Fan Control", body,
+                                  QSystemTrayIcon.Information, 3000)
+        self.refresh()
+
+
+    def toggle_boot(self, checked):
+        res = helper("boot", "on" if checked else "off")
+        if res is None or res.returncode != 0:
+            self.tray.showMessage("Fan Control", "Could not change the boot setting.",
+                                  QSystemTrayIcon.Warning)
+        self.boot_on = boot_enabled()        # re-read: the toggle may have failed
+        self.boot_act.setChecked(self.boot_on)
+
+    # ---- polling
+    def poll_now(self):
+        """Read the fans without blocking the GUI: a synchronous subprocess
+        froze the event loop for ~0.25 s on every poll, which the animation
+        showed as a stutter."""
+        if self.proc.state() != QProcess.NotRunning:
+            return
+        self.proc.start(HELPER, ["status"])
+
+    def _status_ready(self):
+        raw = bytes(self.proc.readAllStandardOutput()).decode("utf-8", "replace")
+        try:
+            self.apply_status(json.loads(raw))
+        except ValueError:
+            self.apply_status(None)
+
+    def refresh(self):
+        self.poll_now()
+
+    def apply_status(self, st):
+        if not st:
+            self.cpu_line.setText("Helper not responding")
+            self.gpu_line.setText("")
+            self.tray.setToolTip("Fan Control -- helper not responding")
+            self._set_spinning(False)
+            return
+
+        cpu, gpu = st.get("cpu", {}), st.get("gpu", {})
+        tips, pcts = [], []
+        rpms = {"cpu": [], "gpu": []}
+
+        if cpu.get("available"):
+            live = [f for f in cpu.get("fans", []) if f.get("connected")]
+            rpms["cpu"] = [f["rpm"] for f in live]
+            rpm = " / ".join(str(f["rpm"]) for f in live)
+            pct = cpu.get("percent", 0)
+            mode = cpu.get("mode", "")
+            pcts.append(pct)
+            temp = cpu.get("temp")
+            bits = []
+            if rpm:
+                bits.append("%s rpm" % rpm)
+            if temp is not None:
+                bits.append("%d °C" % temp)
+            self.cpu_line.setText("CPU / case   " + "   ·   ".join(bits) if bits else "CPU / case")
+            self.cpu_menu.show_value(pct, mode)
+            tips.append("CPU %d%%%s%s" % (pct, ("  ·  %s rpm" % rpm) if rpm else "",
+                                          ("  ·  %d °C" % temp) if temp is not None else ""))
+        else:
+            self.cpu_line.setText(cpu.get("reason", "No motherboard fan control"))
+
+        if gpu.get("available"):
+            pct = gpu.get("percent", 0)
+            rpms["gpu"] = list(gpu.get("rpms") or [])
+            rpm = " / ".join(str(v) for v in rpms["gpu"])
+            mode = gpu.get("mode", "")
+            pcts.append(pct)
+            self.gpu_line.setText(
+                "GPU   %s rpm   ·   %d °C" % (rpm, gpu.get("temp", 0))
+                if rpm else "GPU   %d °C" % gpu.get("temp", 0))
+            rng = gpu.get("range") or [0, 100]
+            self.gpu_menu.set_range(rng[0], rng[1])
+            self.gpu_menu.show_value(pct, mode)
+            tips.append("GPU %d%%%s  ·  %d °C"
+                        % (pct, ("  ·  %s rpm" % rpm) if rpm else "", gpu.get("temp", 0)))
+        else:
+            self.gpu_line.setText(gpu.get("reason", "No GPU fan control"))
+
+        self.tray.setToolTip("Fan Control\n" + "\n".join(tips) if tips else "Fan Control")
+        self.boot_act.setChecked(self.boot_on)
+        self._set_spinning(self._spin_factor(rpms))
+        if self._last_seen != tuple(pcts):
+            self._last_seen = tuple(pcts)
+            log("state  %s" % "  ".join(tips))
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setApplicationName("Fan Control")
+    app.setQuitOnLastWindowClosed(False)
+    if not QSystemTrayIcon.isSystemTrayAvailable():
+        print("No system tray available.", file=sys.stderr)
+        return 1
+    log("--- fan-tray started (pid %d) ---" % os.getpid())
+    Tray(app)
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

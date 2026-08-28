@@ -1,0 +1,11 @@
+// Fan speed is not a security-sensitive setting and the tray changes it
+// repeatedly, so members of wheel are not prompted. The action is bound to a
+// single helper binary that touches nothing but fan controls.
+//
+// Delete this file if you would rather authenticate every time; the action
+// falls back to auth_admin_keep (one prompt per session).
+polkit.addRule(function(action, subject) {
+    if (action.id == "io.github.gabrielmf1998.fancontrol" && subject.isInGroup("wheel")) {
+        return polkit.Result.YES;
+    }
+});

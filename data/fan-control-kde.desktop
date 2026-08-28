@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Fan Control
+GenericName=Fan speed control
+Comment=Set CPU, case and GPU fan speed from the system tray
+Comment[pt_BR]=Controle a velocidade das ventoinhas pela bandeja do sistema
+Exec=/usr/bin/fan-tray
+Icon=sensors-fan
+Terminal=false
+Categories=System;Monitor;Settings;
+Keywords=fan;cooling;pwm;rpm;temperature;
+X-KDE-autostart-phase=2

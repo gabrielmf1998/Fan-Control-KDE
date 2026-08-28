@@ -1,0 +1,29 @@
+# Maintainer: gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com>
+pkgname=fan-control-kde
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Tray applet to control CPU, case and NVIDIA GPU fan speed on KDE"
+arch=('any')
+url="https://github.com/gabrielmf1998/fan-control-kde"
+license=('MIT')
+depends=('python' 'pyside6' 'polkit' 'systemd')
+optdepends=(
+  'lm_sensors: motherboard fan detection'
+  'nvidia-settings: NVIDIA GPU fan control'
+)
+makedepends=('make')
+backup=('etc/polkit-1/rules.d/49-fan-control-kde.rules')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+check() {
+  cd "$pkgname-$pkgver"
+  make check
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  make install DESTDIR="$pkgdir" PREFIX=/usr
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

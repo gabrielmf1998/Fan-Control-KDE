@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+"""Root helper for Fan Tray. Only touches fan controls, nothing else.
+
+Commands:
+    status                 -> JSON with current motherboard + GPU fan state
+    set cpu <0-100|auto>   -> motherboard fan headers
+    set gpu <0-100|auto>   -> NVIDIA fan
+    restore                -> re-apply the saved state (used by the boot service)
+    boot <on|off|status>   -> whether the saved state is restored at boot
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import glob
+
+STATE = "/etc/fan-tray/state.json"
+BOOT_UNIT = "fan-tray-restore.service"
+
+
+# ---------------------------------------------------------------- motherboard
+def hwmon():
+    """Find the Super I/O chip. The hwmonN number changes between boots,
+    so never hardcode it -- always match on the name."""
+    for path in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
+        try:
+            with open(os.path.join(path, "name")) as fh:
+                if fh.read().strip().startswith("nct6"):
+                    return path
+        except OSError:
+            pass
+    return None
+
+
+def pwm_channels(base):
+    return sorted(
+        int(p.rsplit("pwm", 1)[1])
+        for p in glob.glob(os.path.join(base, "pwm[0-9]"))
+    )
+
+
+def read_int(path, default=None):
+    try:
+        with open(path) as fh:
+            return int(fh.read().strip())
+    except (OSError, ValueError):
+        return default
+
+
+def write_int(path, value):
+    try:
+        with open(path, "w") as fh:
+            fh.write(str(value))
+        return True
+    except OSError:
+        return False
+
+
+def cpu_temp():
+    """Package temperature from k10temp: Tctl is what the fan curve follows."""
+    for path in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
+        try:
+            with open(os.path.join(path, "name")) as fh:
+                if fh.read().strip() != "k10temp":
+                    continue
+        except OSError:
+            continue
+        best = {}
+        for lbl in glob.glob(os.path.join(path, "temp*_label")):
+            try:
+                with open(lbl) as fh:
+                    name = fh.read().strip()
+            except OSError:
+                continue
+            val = read_int(lbl.replace("_label", "_input"))
+            if val is not None:
+                best[name] = round(val / 1000.0)
+        for key in ("Tctl", "Tccd1", "Tdie"):
+            if key in best:
+                return best[key]
+    return None
+
+
+def cpu_status():
+    base = hwmon()
+    if not base:
+        return {"available": False, "reason": "no nct6xxx chip found"}
+    fans = []
+    for i in pwm_channels(base):
+        rpm = read_int(os.path.join(base, "fan%d_input" % i))
+        fans.append({
+            "channel": i,
+            "pwm": read_int(os.path.join(base, "pwm%d" % i)),
+            "enable": read_int(os.path.join(base, "pwm%d_enable" % i)),
+            "rpm": rpm,
+            "connected": bool(rpm),
+        })
+    live = [f for f in fans if f["connected"]]
+    pwm = live[0]["pwm"] if live else (fans[0]["pwm"] if fans else 0)
+    enable = live[0]["enable"] if live else (fans[0]["enable"] if fans else 1)
+    return {
+        "available": True,
+        "chip": os.path.basename(base),
+        "fans": fans,
+        "temp": cpu_temp(),
+        # enable 0 is the chip's "full speed" mode: the curve is bypassed
+        "percent": 100 if enable == 0 else round((pwm or 0) * 100 / 255),
+        "mode": "full" if enable == 0 else ("manual" if enable == 1 else "auto"),
+    }
+
+
+def cpu_set(value):
+    base = hwmon()
+    if not base:
+        return False, "no nct6xxx chip found"
+    channels = pwm_channels(base)
+    if not channels:
+        return False, "chip exposes no pwm channels"
+
+    for i in channels:
+        en = os.path.join(base, "pwm%d_enable" % i)
+        pw = os.path.join(base, "pwm%d" % i)
+        if value == "auto":
+            # 5 = Smart Fan IV (what the BIOS uses); 2 = thermal cruise fallback
+            if not write_int(en, 5):
+                write_int(en, 2)
+        elif int(value) >= 100:
+            write_int(en, 0)          # full speed, curve bypassed
+            write_int(pw, 255)
+        else:
+            write_int(en, 1)          # manual
+            write_int(pw, round(int(value) * 255 / 100))
+    return True, None
+
+
+# ---------------------------------------------------------------------- nvidia
+def nvidia_env():
+    """nvidia-settings needs the user's X/XWayland session. The xauth file may
+    not exist yet right after boot, so resolve it fresh on every call."""
+    env = dict(os.environ)
+    env["DISPLAY"] = env.get("DISPLAY", ":0")
+    xauth = sorted(glob.glob("/run/user/*/xauth_*"), key=os.path.getmtime, reverse=True)
+    if xauth:
+        env["XAUTHORITY"] = xauth[0]
+    return env
+
+
+def nvidia_settings(args):
+    try:
+        return subprocess.run(
+            ["nvidia-settings"] + args,
+            env=nvidia_env(), capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def gpu_status():
+    try:
+        out = subprocess.run(
+            ["nvidia-smi",
+             "--query-gpu=fan.speed,temperature.gpu,utilization.gpu",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {"available": False, "reason": "nvidia-smi not responding"}
+    if out.returncode != 0 or not out.stdout.strip():
+        return {"available": False, "reason": "no NVIDIA GPU"}
+    speed, temp, util = [p.strip() for p in out.stdout.strip().split(",")]
+
+    res = nvidia_settings(["-q", "[gpu:0]/GPUFanControlState"])
+    manual = bool(res and ": 1." in res.stdout)
+
+    # nvidia-smi only reports a percentage; the real tachometer lives in
+    # nvidia-settings as GPUCurrentFanSpeedRPM, one value per physical fan.
+    rpms = []
+    for fan in (0, 1, 2, 3):
+        r = nvidia_settings(["-q", "[fan:%d]/GPUCurrentFanSpeedRPM" % fan])
+        if not r or r.returncode != 0:
+            continue
+        for line in r.stdout.splitlines():
+            if "GPUCurrentFanSpeedRPM" in line and "):" in line:
+                digits = line.rsplit("):", 1)[1].strip().rstrip(".")
+                if digits.isdigit():
+                    rpms.append(int(digits))
+                break
+
+    return {
+        "available": True,
+        "percent": int(speed) if speed.isdigit() else 0,
+        "temp": int(temp) if temp.isdigit() else 0,
+        "util": int(util) if util.isdigit() else 0,
+        "rpms": rpms,
+        "range": list(gpu_range()),
+        "mode": "manual" if manual else "auto",
+    }
+
+
+def gpu_range():
+    """Ask the driver for its own limits.
+
+    GeForce cards refuse anything below ~30%, and nvidia-settings still exits 0
+    when it refuses -- so a request outside the range looks like success while
+    the fan never moves. Never assume 0-100 here.
+    """
+    r = nvidia_settings(["-q", "[fan:0]/GPUTargetFanSpeed"])
+    if r and r.returncode == 0:
+        m = re.search(r"range\s+(\d+)\s*-\s*(\d+)", r.stdout)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+    return 30, 100
+
+
+def gpu_target():
+    r = nvidia_settings(["-q", "[fan:0]/GPUTargetFanSpeed"])
+    if r and r.returncode == 0:
+        m = re.search(r"GPUTargetFanSpeed'\s*\([^)]*\):\s*(\d+)", r.stdout)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def gpu_set(value):
+    if value == "auto":
+        res = nvidia_settings(["-a", "[gpu:0]/GPUFanControlState=0"])
+        return (res is not None and res.returncode == 0), "nvidia-settings failed"
+    want = int(value)
+    lo, hi = gpu_range()
+    pct = max(lo, min(hi, want))
+
+    res = nvidia_settings(["-a", "[gpu:0]/GPUFanControlState=1"])
+    if res is None or res.returncode != 0:
+        return False, "could not enable manual fan control"
+    for fan in (0, 1, 2):
+        nvidia_settings(["-a", "[fan:%d]/GPUTargetFanSpeed=%d" % (fan, pct)])
+
+    # read it back: exit codes from nvidia-settings mean nothing here
+    got = gpu_target()
+    if got is None:
+        return False, "could not read the fan speed back"
+    if got != pct:
+        return False, "the driver kept %d%% (asked for %d%%)" % (got, pct)
+
+    # The API only takes lo-hi, but the card's own zero-RPM mode can still stop
+    # the fans at the low end -- so report what the fan actually did, not the
+    # number we sent it.
+    time.sleep(2.0)
+    real = gpu_status().get("percent")
+    if real is None:
+        return True, None
+    if real != want:
+        return True, "GPU fan is at %d%%" % real
+    return True, None
+
+
+# ----------------------------------------------------------------------- state
+def state_load():
+    try:
+        with open(STATE) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {"cpu": 100, "gpu": 100}
+
+
+def state_save(cpu, gpu):
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    with open(STATE, "w") as fh:
+        json.dump({"cpu": cpu, "gpu": gpu}, fh)
+        fh.write("\n")
+
+
+# ------------------------------------------------------------------------ main
+def main():
+    if len(sys.argv) < 2:
+        print("usage: fan-tray-helper status|set|restore|boot", file=sys.stderr)
+        return 2
+    cmd = sys.argv[1]
+
+    if cmd == "status":
+        print(json.dumps({"cpu": cpu_status(), "gpu": gpu_status(),
+                          "saved": state_load()}))
+        return 0
+
+    if cmd == "set" and len(sys.argv) == 4:
+        target, value = sys.argv[2], sys.argv[3]
+        fn = {"cpu": cpu_set, "gpu": gpu_set}.get(target)
+        if not fn:
+            print("target must be cpu or gpu", file=sys.stderr)
+            return 2
+        ok, err = fn(value)
+        saved = state_load()
+        saved[target] = value
+        state_save(saved.get("cpu", 100), saved.get("gpu", 100))
+        if not ok:
+            print(err or "failed", file=sys.stderr)
+        elif err:
+            print(err)          # applied, but not exactly what was asked
+        return 0 if ok else 1
+
+    if cmd == "boot" and len(sys.argv) == 3:
+        arg = sys.argv[2]
+        if arg == "status":
+            r = subprocess.run(["systemctl", "is-enabled", BOOT_UNIT],
+                               capture_output=True, text=True)
+            print(r.stdout.strip() or "disabled")
+            return 0
+        if arg in ("on", "off"):
+            verb = "enable" if arg == "on" else "disable"
+            r = subprocess.run(["systemctl", verb, BOOT_UNIT],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                print((r.stderr or "").strip(), file=sys.stderr)
+            return r.returncode
+        print("boot takes on, off or status", file=sys.stderr)
+        return 2
+
+    if cmd == "restore":
+        saved = state_load()
+        a, _ = cpu_set(saved.get("cpu", 100))
+        b, _ = gpu_set(saved.get("gpu", 100))
+        print("cpu=%s gpu=%s" % (saved.get("cpu"), saved.get("gpu")))
+        return 0 if (a and b) else 1
+
+    print("unknown command", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,17 @@
+[Unit]
+Description=Restore fan speeds saved by Fan Control KDE
+# The GPU is driven through nvidia-settings, which needs the user's X/XWayland
+# session -- that appears a little after boot, hence the delay and the retry.
+After=multi-user.target
+Wants=graphical.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/bin/sleep 20
+ExecStart=/usr/libexec/fan-tray-helper restore
+Restart=on-failure
+RestartSec=20
+
+[Install]
+WantedBy=graphical.target
