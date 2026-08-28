@@ -16,7 +16,7 @@ import sys
 import time
 import glob
 
-STATE = "/etc/fan-tray/state.json"
+STATE = "/etc/fan-control-kde/state.json"
 BOOT_UNIT = "fan-tray-restore.service"
 
 
