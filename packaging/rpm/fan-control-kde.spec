@@ -1,5 +1,5 @@
 Name:           fan-control-kde
-Version:        1.0.0
+Version:        1.0.1
 Release:        1%{?dist}
 Summary:        Tray applet to control CPU, case and NVIDIA GPU fan speed on KDE
 
@@ -58,5 +58,8 @@ touches nothing but fan controls.
 %dir /etc/fan-control-kde
 
 %changelog
+* Fri Aug 28 2026 gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com> - 1.0.1-1
+- Helper state path now matches the packaged /etc/fan-control-kde directory
+
 * Fri Aug 28 2026 gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com> - 1.0.0-1
 - First release
