@@ -1,5 +1,5 @@
 Name:           fan-control-kde
-Version:        1.1.0
+Version:        1.1.1
 Release:        1%{?dist}
 Summary:        Tray applet to control CPU, case and NVIDIA GPU fan speed on KDE
 
@@ -40,6 +40,12 @@ touches nothing but fan controls.
 
 %post
 %systemd_post fan-tray-restore.service
+# an entry from the pre-packaging manual install, if it is still around
+rm -f %{_datadir}/applications/fan-tray.desktop
+touch --no-create %{_datadir}/icons/hicolor &>/dev/null || :
+
+%posttrans
+gtk-update-icon-cache %{_datadir}/icons/hicolor &>/dev/null || :
 
 %preun
 %systemd_preun fan-tray-restore.service
@@ -53,12 +59,17 @@ touches nothing but fan controls.
 %{_bindir}/fan-tray
 %{_libexecdir}/fan-tray-helper
 %{_datadir}/applications/fan-control-kde.desktop
+%{_datadir}/icons/hicolor/scalable/apps/fan-control-kde.svg
 %{_datadir}/polkit-1/actions/io.github.gabrielmf1998.fancontrol.policy
 %{_prefix}/lib/systemd/system/fan-tray-restore.service
 %config(noreplace) /etc/polkit-1/rules.d/49-fan-control-kde.rules
 %dir /etc/fan-control-kde
 
 %changelog
+* %s gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com> - 1.1.1-1
+- Ships its own icon: the referenced sensors-fan does not exist in Breeze
+- Removes the stale fan-tray.desktop left by a pre-packaging install
+
 * %s gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com> - 1.1.0-1
 - Hardware is now discovered at runtime instead of hardcoded
 - AMD GPUs supported through the amdgpu hwmon pwm interface

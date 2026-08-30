@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg width="45.1556mm" height="45.1556mm"
+ viewBox="0 0 128 128"
+ xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.2" baseProfile="tiny">
+<title>Fan Control</title>
+<desc>Fan Control KDE application icon</desc>
+<defs>
+</defs>
+<g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel" >
+
+<g fill="#2e6fb7" fill-opacity="1" stroke="none" transform="matrix(1,0,0,1,64,64)"
+font-family="Sans Serif" font-size="9" font-weight="400" font-style="normal" 
+>
+<path vector-effect="none" fill-rule="evenodd" d="M-60.16,-40.96 C-60.16,-51.5639 -51.5639,-60.16 -40.96,-60.16 L40.96,-60.16 C51.5639,-60.16 60.16,-51.5639 60.16,-40.96 L60.16,40.96 C60.16,51.5639 51.5639,60.16 40.96,60.16 L-40.96,60.16 C-51.5639,60.16 -60.16,51.5639 -60.16,40.96 L-60.16,-40.96 Z "/>
+</g>
+
+<g fill="#f2f6fb" fill-opacity="1" stroke="none" transform="matrix(1,0,0,1,64,64)"
+font-family="Sans Serif" font-size="9" font-weight="400" font-style="normal" 
+>
+</g>
+
+<g fill="#f2f6fb" fill-opacity="1" stroke="none" transform="matrix(1,0,0,1,64,64)"
+font-family="Sans Serif" font-size="9" font-weight="400" font-style="normal" 
+>
+<path vector-effect="none" fill-rule="evenodd" d="M35.6708,17.4015 C38.2387,12.1474 39.68,6.24201 39.68,0 C39.68,-6.24348 38.238,-12.1502 35.6689,-17.4052 L5.42734,-8.68502 C8.31798,-6.87463 10.24,-3.66177 10.24,0 C10.24,1.61122 9.86788,3.13553 9.20536,4.49071 L35.6708,17.4015 Z "/>
+</g>
+
+<g fill="#f2f6fb" fill-opacity="1" stroke="none" transform="matrix(1,0,0,1,64,64)"
+font-family="Sans Serif" font-size="9" font-weight="400" font-style="normal" 
+>
+</g>
+
+<g fill="#f2f6fb" fill-opacity="1" stroke="none" transform="matrix(0.309017,0.951057,-0.951057,0.309017,64,64)"
+font-family="Sans Serif" font-size="9" font-weight="400" font-style="normal" 
+>
+<path vector-effect="none" fill-rule="evenodd" d="M35.6708,17.4015 C38.2387,12.1474 39.68,6.24201 39.68,0 C39.68,-6.24348 38.238,-12.1502 35.6689,-17.4052 L5.42734,-8.68502 C8.31798,-6.87463 10.24,-3.66177 10.24,0 C10.24,1.61122 9.86788,3.13553 9.20536,4.49071 L35.6708,17.4015 Z "/>
+</g>
+
+<g fill="#f2f6fb" fill-opacity="1" stroke="none" transform="matrix(1,0,0,1,64,64)"
+font-family="Sans Serif" font-size="9" font-weight="400" font-style="normal" 
+>
+</g>
+
+<g fill="#f2f6fb" fill-opacity="1" stroke="none" transform="matrix(-0.809017,0.587785,-0.587785,-0.809017,64,64)"
+font-family="Sans Serif" font-size="9" font-weight="400" font-style="normal" 
+>
+<path vector-effect="none" fill-rule="evenodd" d="M35.6708,17.4015 C38.2387,12.1474 39.68,6.24201 39.68,0 C39.68,-6.24348 38.238,-12.1502 35.6689,-17.4052 L5.42734,-8.68502 C8.31798,-6.87463 10.24,-3.66177 10.24,0 C10.24,1.61122 9.86788,3.13553 9.20536,4.49071 L35.6708,17.4015 Z "/>
+</g>
+
+<g fill="#f2f6fb" fill-opacity="1" stroke="none" transform="matrix(1,0,0,1,64,64)"
+font-family="Sans Serif" font-size="9" font-weight="400" font-style="normal" 
+>
+</g>
+
+<g fill="#f2f6fb" fill-opacity="1" stroke="none" transform="matrix(-0.809017,-0.587785,0.587785,-0.809017,64,64)"
+font-family="Sans Serif" font-size="9" font-weight="400" font-style="normal" 
+>
+<path vector-effect="none" fill-rule="evenodd" d="M35.6708,17.4015 C38.2387,12.1474 39.68,6.24201 39.68,0 C39.68,-6.24348 38.238,-12.1502 35.6689,-17.4052 L5.42734,-8.68502 C8.31798,-6.87463 10.24,-3.66177 10.24,0 C10.24,1.61122 9.86788,3.13553 9.20536,4.49071 L35.6708,17.4015 Z "/>
+</g>
+
+<g fill="#f2f6fb" fill-opacity="1" stroke="none" transform="matrix(1,0,0,1,64,64)"
+font-family="Sans Serif" font-size="9" font-weight="400" font-style="normal" 
+>
+</g>
+
+<g fill="#f2f6fb" fill-opacity="1" stroke="none" transform="matrix(0.309017,-0.951057,0.951057,0.309017,64,64)"
+font-family="Sans Serif" font-size="9" font-weight="400" font-style="normal" 
+>
+<path vector-effect="none" fill-rule="evenodd" d="M35.6708,17.4015 C38.2387,12.1474 39.68,6.24201 39.68,0 C39.68,-6.24348 38.238,-12.1502 35.6689,-17.4052 L5.42734,-8.68502 C8.31798,-6.87463 10.24,-3.66177 10.24,0 C10.24,1.61122 9.86788,3.13553 9.20536,4.49071 L35.6708,17.4015 Z "/>
+</g>
+
+<g fill="#f2f6fb" fill-opacity="1" stroke="none" transform="matrix(1,0,0,1,64,64)"
+font-family="Sans Serif" font-size="9" font-weight="400" font-style="normal" 
+>
+</g>
+
+<g fill="#f2f6fb" fill-opacity="1" stroke="none" transform="matrix(1,0,0,1,64,64)"
+font-family="Sans Serif" font-size="9" font-weight="400" font-style="normal" 
+>
+<circle cx="0" cy="0" r="7.36"/>
+</g>
+</g>
+</svg>

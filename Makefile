@@ -7,6 +7,7 @@ POLICYDIR   := $(DESTDIR)$(PREFIX)/share/polkit-1/actions
 RULESDIR    := $(DESTDIR)/etc/polkit-1/rules.d
 UNITDIR     := $(DESTDIR)$(PREFIX)/lib/systemd/system
 STATEDIR    := $(DESTDIR)/etc/fan-control-kde
+ICONDIR     := $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps
 
 ACTION := io.github.gabrielmf1998.fancontrol
 
@@ -26,6 +27,7 @@ install:
 	install -Dm644 data/49-fan-control-kde.rules $(RULESDIR)/49-fan-control-kde.rules
 	install -Dm644 data/fan-tray-restore.service $(UNITDIR)/fan-tray-restore.service
 	install -Dm644 data/fan-control-kde.desktop  $(APPDIR)/fan-control-kde.desktop
+	install -Dm644 data/icons/fan-control-kde.svg $(ICONDIR)/fan-control-kde.svg
 	install -dm755 $(STATEDIR)
 
 uninstall:
@@ -35,4 +37,5 @@ uninstall:
 	rm -f  $(RULESDIR)/49-fan-control-kde.rules
 	rm -f  $(UNITDIR)/fan-tray-restore.service
 	rm -f  $(APPDIR)/fan-control-kde.desktop
+	rm -f  $(ICONDIR)/fan-control-kde.svg
 	rm -rf $(STATEDIR)

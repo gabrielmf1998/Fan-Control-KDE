@@ -11,7 +11,7 @@
     <description xml:lang="pt_BR">Alterar a velocidade das ventoinhas</description>
     <message>Authentication is required to change the fan speed</message>
     <message xml:lang="pt_BR">É necessário autenticar para alterar a velocidade das ventoinhas</message>
-    <icon_name>sensors-fan</icon_name>
+    <icon_name>fan-control-kde</icon_name>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
