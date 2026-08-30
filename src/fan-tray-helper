@@ -13,7 +13,6 @@ import os
 import re
 import subprocess
 import sys
-import time
 import glob
 
 STATE = "/etc/fan-control-kde/state.json"
@@ -226,7 +225,11 @@ def gpu_target():
 def gpu_set(value):
     if value == "auto":
         res = nvidia_settings(["-a", "[gpu:0]/GPUFanControlState=0"])
-        return (res is not None and res.returncode == 0), "nvidia-settings failed"
+        ok = res is not None and res.returncode == 0
+        # The message belongs to the failure branch only. Returning it
+        # unconditionally made a successful switch to Auto report
+        # "nvidia-settings failed" as a note.
+        return ok, (None if ok else "nvidia-settings failed")
     want = int(value)
     lo, hi = gpu_range()
     pct = max(lo, min(hi, want))
@@ -244,15 +247,12 @@ def gpu_set(value):
     if got != pct:
         return False, "the driver kept %d%% (asked for %d%%)" % (got, pct)
 
-    # The API only takes lo-hi, but the card's own zero-RPM mode can still stop
-    # the fans at the low end -- so report what the fan actually did, not the
-    # number we sent it.
-    time.sleep(2.0)
-    real = gpu_status().get("percent")
-    if real is None:
-        return True, None
-    if real != want:
-        return True, "GPU fan is at %d%%" % real
+    # Only say something when the driver actually refused the request. Reading
+    # the fan back right after a change reports a value mid-ramp, so a plain
+    # "set to 100%" would answer "GPU fan is at 68%" while it is still spinning
+    # up. The live reading in the menu covers that.
+    if pct != want:
+        return True, "clamped to %d%%: this GPU accepts %d-%d%%" % (pct, lo, hi)
     return True, None
 
 
