@@ -18,6 +18,23 @@ _The nine icon styles, each drawn at runtime._
 - Nine hand-drawn fan icons, painted at runtime so they follow your panel's
   colour in light and dark themes.
 
+## Supported hardware
+
+Everything is discovered at startup by probing sysfs — nothing is hardcoded for
+a particular board or card. A controller that cannot be driven is still listed,
+with the reason, instead of being hidden.
+
+| | Control | Notes |
+|---|---|---|
+| **Motherboard fan headers** | yes | any chip exposing `pwmN` under `/sys/class/hwmon` — `nct6775` family, `it87`, `f71882fg` and friends |
+| **AMD RX 400/500** (Polaris) | yes | classic `amdgpu` hwmon `pwm1` |
+| **AMD RX 5000/6000** (RDNA/RDNA2) | yes | same interface |
+| **AMD RX 7000** (RDNA3) | usually | some boards' firmware refuses manual PWM; the write fails and the app says so instead of pretending |
+| **NVIDIA** (proprietary driver) | yes | through `nvidia-settings`; needs an X or XWayland session |
+| **Intel Arc** (`i915`) | read only | the driver exposes `fan1_input` but no PWM |
+| **Intel Arc** (`xe`) | read only | PWM control is not in mainline yet |
+| **Integrated GPUs** | n/a | no fan of their own; skipped automatically |
+
 ## Requirements
 
 | | |
@@ -27,23 +44,18 @@ _The nine icon styles, each drawn at runtime._
 | Qt bindings | **PySide6** |
 | Privileges | **polkit** (`pkexec`) |
 | Init | **systemd**, only for the "keep after reboot" option |
+| Optional | `lspci` for readable GPU names, `nvidia-settings` for NVIDIA |
 
-**For motherboard fans:** a Super I/O chip with a `pwm*` interface under
-`/sys/class/hwmon`. The `nct6775` driver family covers most consumer boards;
-load it with `modprobe nct6775` if `sensors` shows no fans. Developed against
-an **nct6799** (ASRock B650M-HDV/M.2).
-
-**For the GPU:** the NVIDIA proprietary driver with `nvidia-smi` and
-`nvidia-settings`, and a running X or XWayland session. AMD and Intel GPUs are
-not supported — the tray simply hides the GPU entry.
+If `sensors` shows no fans, the Super I/O driver is probably not loaded — try
+`sudo modprobe nct6775` (or run `sudo sensors-detect`).
 
 ### Fedora
 ```
-sudo dnf install python3-pyside6 polkit lm_sensors
+sudo dnf install python3-pyside6 polkit lm_sensors pciutils
 ```
 ### Arch
 ```
-sudo pacman -S pyside6 polkit lm_sensors
+sudo pacman -S pyside6 polkit lm_sensors pciutils
 ```
 
 ## Install
@@ -68,6 +80,12 @@ reports success while the fan never moves. The helper clamps to the driver's
 own advertised range and then **reads the speed back** to report what really
 happened. Many cards still stop their fans entirely at the low end via their
 own zero-RPM mode, so 0 % is often a real outcome.
+
+**AMD RX 7000 may refuse manual control.** The kernel exposes `pwm1_enable`
+on every `amdgpu` card, but on some RDNA3 boards the firmware rejects the
+write. The app reports the errno it got rather than claiming success. Those
+cards still accept a fan curve through `gpu_od/fan_ctrl/fan_curve`, which this
+version does not drive yet.
 
 **Motherboard fans may not stop at 0 %.** Most 4-pin fans have a mechanical
 minimum and keep turning at ~500 rpm even at 0 % duty. If your board exposes

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Fan Tray -- tray icon only. No windows, no dialogs.
 
 Speed is picked from a level list in the menu. A tray menu is exported over
@@ -306,6 +306,7 @@ class SpeedMenu:
     def __init__(self, parent, title, on_apply):
         self.on_apply = on_apply
         self.title_base = title
+        self.lo, self.hi = 0, 100
         self.current = 100
         self.menu = parent.addMenu(title)
 
@@ -365,10 +366,13 @@ class Tray:
         self.frame = 0.0
         # self-calibrating: the fastest rpm ever seen becomes the reference,
         # so CPU (~1550) and GPU (~3000) are each scaled against themselves
-        self._rpm_max = {"cpu": 1.0, "gpu": 1.0}
+        self._rpm_max = {}
         self._last_seen = None
         self.colour = QColor(app.palette().windowText().color())
 
+        self.dev_ids = []
+        self.dev_lines = {}
+        self.dev_menus = {}
         self.tray = QSystemTrayIcon()
         self.tray.setToolTip("Fan Control")
         self._build_menu()
@@ -385,22 +389,34 @@ class Tray:
         self.poll.start(4000)
         self.poll_now()
 
-    def _build_menu(self):
+    def _build_menu(self, devices=None):
+        """Rebuilt whenever the set of detected devices changes. Everything is
+        discovered at runtime, so a machine with two GPUs or none at all gets a
+        menu that matches it."""
         m = QMenu()
+        self.dev_lines = {}
+        self.dev_menus = {}
 
-        self.cpu_line = QAction("Reading fans...", m)
-        self.cpu_line.setEnabled(False)
-        m.addAction(self.cpu_line)
-        self.cpu_menu = SpeedMenu(m, "CPU / case", lambda v: self.set_speed("cpu", v))
+        if not devices:
+            act = QAction("Detecting fans...", m)
+            act.setEnabled(False)
+            m.addAction(act)
+        for dev in devices or []:
+            line = QAction(dev["label"], m)
+            line.setEnabled(False)
+            m.addAction(line)
+            self.dev_lines[dev["id"]] = line
 
-        m.addSeparator()
+            if dev.get("control"):
+                sm = SpeedMenu(m, dev["label"],
+                               lambda v, i=dev["id"]: self.set_speed(i, v))
+                self.dev_menus[dev["id"]] = sm
+            else:
+                note = QAction("  %s" % dev.get("reason", "monitoring only"), m)
+                note.setEnabled(False)
+                m.addAction(note)
+            m.addSeparator()
 
-        self.gpu_line = QAction("...", m)
-        self.gpu_line.setEnabled(False)
-        m.addAction(self.gpu_line)
-        self.gpu_menu = SpeedMenu(m, "GPU", lambda v: self.set_speed("gpu", v))
-
-        m.addSeparator()
         icons = m.addMenu("Icon")
         self.icon_group = QActionGroup(icons)
         self.icon_group.setExclusive(True)
@@ -414,12 +430,13 @@ class Tray:
 
         m.addSeparator()
         self.boot_act = QAction("Keep speeds after reboot", m, checkable=True)
+        self.boot_act.setChecked(getattr(self, "boot_on", False))
         self.boot_act.triggered.connect(self.toggle_boot)
         m.addAction(self.boot_act)
 
         m.addSeparator()
         m.addAction(QAction("Quit", m, triggered=self.app.quit))
-        self.menu = m
+        self.menu = m                      # keep a reference: Qt does not
         self.tray.setContextMenu(m)
 
     # ---- animation
@@ -438,13 +455,13 @@ class Tray:
         """
         vals = []
         for key, group in rpms.items():
-            group = [r for r in group if r is not None]
+            group = [r for r in group if r]
             if not group:
                 continue
             top = max(group)
-            if top > self._rpm_max[key]:
+            if top > self._rpm_max.get(key, 1.0):
                 self._rpm_max[key] = float(top)
-            vals.append(top / self._rpm_max[key])
+            vals.append(top / self._rpm_max.get(key, 1.0))
         if not vals:
             return 0.0
         return max(0.0, min(1.0, sum(vals) / len(vals)))
@@ -477,11 +494,11 @@ class Tray:
                                   QSystemTrayIcon.Warning)
         self.refresh()
 
-    def set_speed(self, group, value):
-        label = "CPU / case" if group == "cpu" else "GPU"
-        log("CLICK  %s -> %s" % (group, value))
+    def set_speed(self, dev_id, value):
+        label = self.dev_lines[dev_id].text() if dev_id in self.dev_lines else dev_id
+        log("CLICK  %s -> %s" % (dev_id, value))
         t0 = time.monotonic()
-        res = helper("set", group, value)
+        res = helper("set", dev_id, value)
         dt = time.monotonic() - t0
 
         if res is None:
@@ -490,15 +507,15 @@ class Tray:
                                   QSystemTrayIcon.Warning)
         elif res.returncode != 0:
             err = (res.stderr or "").strip()
-            log("       exit=%d (%.1fs) stderr=%s" % (res.returncode, dt, err[:160]))
+            log("       exit=%d (%.1fs) %s" % (res.returncode, dt, err[:160]))
             self.tray.showMessage("Fan Control", err or "Could not change the fan speed.",
                                   QSystemTrayIcon.Warning)
         else:
             note = (res.stdout or "").strip()
             log("       ok (%.1fs)%s" % (dt, "  " + note if note else ""))
             shown = "Auto" if value == "auto" else "%s%%" % value
-            body = note if note else "%s set to %s" % (label, shown)
-            self.tray.showMessage("Fan Control", body,
+            self.tray.showMessage("Fan Control",
+                                  note or "%s set to %s" % (label, shown),
                                   QSystemTrayIcon.Information, 3000)
         self.refresh()
 
@@ -531,60 +548,50 @@ class Tray:
         self.poll_now()
 
     def apply_status(self, st):
-        if not st:
-            self.cpu_line.setText("Helper not responding")
-            self.gpu_line.setText("")
-            self.tray.setToolTip("Fan Control -- helper not responding")
-            self._set_spinning(False)
+        devices = (st or {}).get("devices") or []
+        ids = [d["id"] for d in devices]
+        if ids != self.dev_ids:                  # hardware appeared or vanished
+            self.dev_ids = ids
+            self._build_menu(devices)
+
+        if not devices:
+            self.tray.setToolTip("Fan Control -- no fan controller found")
+            self._set_spinning(0.0)
             return
 
-        cpu, gpu = st.get("cpu", {}), st.get("gpu", {})
-        tips, pcts = [], []
-        rpms = {"cpu": [], "gpu": []}
-
-        if cpu.get("available"):
-            live = [f for f in cpu.get("fans", []) if f.get("connected")]
-            rpms["cpu"] = [f["rpm"] for f in live]
-            rpm = " / ".join(str(f["rpm"]) for f in live)
-            pct = cpu.get("percent", 0)
-            mode = cpu.get("mode", "")
-            pcts.append(pct)
-            temp = cpu.get("temp")
+        tips, rpms = [], {}
+        for dev in devices:
+            dev_id = dev["id"]
+            rpm_list = [r for r in (dev.get("rpms") or []) if r]
+            rpms[dev_id] = rpm_list
             bits = []
-            if rpm:
-                bits.append("%s rpm" % rpm)
-            if temp is not None:
-                bits.append("%d °C" % temp)
-            self.cpu_line.setText("CPU / case   " + "   ·   ".join(bits) if bits else "CPU / case")
-            self.cpu_menu.show_value(pct, mode)
-            tips.append("CPU %d%%%s%s" % (pct, ("  ·  %s rpm" % rpm) if rpm else "",
-                                          ("  ·  %d °C" % temp) if temp is not None else ""))
-        else:
-            self.cpu_line.setText(cpu.get("reason", "No motherboard fan control"))
+            if rpm_list:
+                bits.append("%s rpm" % " / ".join(str(r) for r in rpm_list))
+            if dev.get("temp") is not None:
+                bits.append("%d °C" % dev["temp"])
+            line = dev["label"] + ("   " + "   ·   ".join(bits) if bits else "")
+            if dev_id in self.dev_lines:
+                self.dev_lines[dev_id].setText(line)
 
-        if gpu.get("available"):
-            pct = gpu.get("percent", 0)
-            rpms["gpu"] = list(gpu.get("rpms") or [])
-            rpm = " / ".join(str(v) for v in rpms["gpu"])
-            mode = gpu.get("mode", "")
-            pcts.append(pct)
-            self.gpu_line.setText(
-                "GPU   %s rpm   ·   %d °C" % (rpm, gpu.get("temp", 0))
-                if rpm else "GPU   %d °C" % gpu.get("temp", 0))
-            rng = gpu.get("range") or [0, 100]
-            self.gpu_menu.set_range(rng[0], rng[1])
-            self.gpu_menu.show_value(pct, mode)
-            tips.append("GPU %d%%%s  ·  %d °C"
-                        % (pct, ("  ·  %s rpm" % rpm) if rpm else "", gpu.get("temp", 0)))
-        else:
-            self.gpu_line.setText(gpu.get("reason", "No GPU fan control"))
+            sm = self.dev_menus.get(dev_id)
+            if sm:
+                rng = dev.get("range") or [0, 100]
+                sm.set_range(rng[0], rng[1])
+                sm.show_value(dev.get("percent", 0), dev.get("mode", ""))
 
-        self.tray.setToolTip("Fan Control\n" + "\n".join(tips) if tips else "Fan Control")
+            tips.append("%s  %d%%%s" % (dev["label"], dev.get("percent", 0),
+                                        ("  ·  " + "  ·  ".join(bits)) if bits else ""))
+
+        self.tray.setToolTip("Fan Control\n" + "\n".join(tips))
         self.boot_act.setChecked(self.boot_on)
         self._set_spinning(self._spin_factor(rpms))
-        if self._last_seen != tuple(pcts):
-            self._last_seen = tuple(pcts)
-            log("state  %s" % "  ".join(tips))
+
+        # keyed on percent and mode only: rpm wobbles by a few counts every
+        # poll and would otherwise log a line every 4 seconds forever
+        snapshot = tuple((d["id"], d.get("percent"), d.get("mode")) for d in devices)
+        if snapshot != self._last_seen:
+            self._last_seen = snapshot
+            log("state  " + "   |   ".join(tips))
 
 
 def main():

@@ -1,6 +1,6 @@
 # Maintainer: gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com>
 pkgname=fan-control-kde
-pkgver=1.0.2
+pkgver=1.1.0
 pkgrel=1
 pkgdesc="Tray applet to control CPU, case and NVIDIA GPU fan speed on KDE"
 arch=('any')
@@ -10,6 +10,7 @@ depends=('python' 'pyside6' 'polkit' 'systemd')
 optdepends=(
   'lm_sensors: motherboard fan detection'
   'nvidia-settings: NVIDIA GPU fan control'
+  'pciutils: readable GPU names'
 )
 makedepends=('make')
 backup=('etc/polkit-1/rules.d/49-fan-control-kde.rules')

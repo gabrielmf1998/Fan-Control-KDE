@@ -1,5 +1,5 @@
 Name:           fan-control-kde
-Version:        1.0.2
+Version:        1.1.0
 Release:        1%{?dist}
 Summary:        Tray applet to control CPU, case and NVIDIA GPU fan speed on KDE
 
@@ -14,6 +14,7 @@ BuildRequires:  python3
 Requires:       python3
 Requires:       python3-pyside6
 Requires:       polkit
+Recommends:     pciutils
 Requires:       systemd
 # lm_sensors ships the hwmon tooling; nvidia-settings is optional and only
 # needed for GPU control, so it is deliberately not a hard dependency.
@@ -58,6 +59,13 @@ touches nothing but fan controls.
 %dir /etc/fan-control-kde
 
 %changelog
+* %s gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com> - 1.1.0-1
+- Hardware is now discovered at runtime instead of hardcoded
+- AMD GPUs supported through the amdgpu hwmon pwm interface
+- Intel GPUs detected and listed as monitor-only
+- Any Super I/O chip with pwm channels works, not just nct6xxx
+- The menu is built from whatever the machine actually has
+
 * %s gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com> - 1.0.2-1
 - Switching the GPU to Auto no longer reports "nvidia-settings failed" on success
 - A speed change no longer reports a mid-ramp reading; only a real clamp is announced

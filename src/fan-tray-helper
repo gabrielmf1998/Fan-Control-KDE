@@ -1,304 +1,566 @@
 #!/usr/bin/env python3
-"""Root helper for Fan Tray. Only touches fan controls, nothing else.
+"""Root helper for Fan Control KDE.
+
+Discovers every fan controller on the machine and drives whichever backend each
+one needs. Nothing about the hardware is assumed -- capabilities are probed, and
+a device that cannot be driven is reported as monitor-only rather than hidden,
+so the user can see it exists and why it is not adjustable.
 
 Commands:
-    status                 -> JSON with current motherboard + GPU fan state
-    set cpu <0-100|auto>   -> motherboard fan headers
-    set gpu <0-100|auto>   -> NVIDIA fan
-    restore                -> re-apply the saved state (used by the boot service)
-    boot <on|off|status>   -> whether the saved state is restored at boot
+    status                    -> JSON: {"devices": [...]}
+    set <device-id> <0-100|auto>
+    restore                   -> re-apply the saved speeds (boot service)
+    boot <on|off|status>      -> whether speeds are restored at boot
 """
+import glob
 import json
 import os
 import re
 import subprocess
 import sys
-import glob
 
 STATE = "/etc/fan-control-kde/state.json"
 BOOT_UNIT = "fan-tray-restore.service"
+SYSFS_HWMON = "/sys/class/hwmon"
+SYSFS_DRM = "/sys/class/drm"
 
 
-# ---------------------------------------------------------------- motherboard
-def hwmon():
-    """Find the Super I/O chip. The hwmonN number changes between boots,
-    so never hardcode it -- always match on the name."""
-    for path in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
-        try:
-            with open(os.path.join(path, "name")) as fh:
-                if fh.read().strip().startswith("nct6"):
-                    return path
-        except OSError:
-            pass
-    return None
-
-
-def pwm_channels(base):
-    return sorted(
-        int(p.rsplit("pwm", 1)[1])
-        for p in glob.glob(os.path.join(base, "pwm[0-9]"))
-    )
+# ------------------------------------------------------------------- sysfs I/O
+def read_text(path):
+    try:
+        with open(path) as fh:
+            return fh.read().strip()
+    except OSError:
+        return None
 
 
 def read_int(path, default=None):
+    raw = read_text(path)
     try:
-        with open(path) as fh:
-            return int(fh.read().strip())
-    except (OSError, ValueError):
+        return int(raw)
+    except (TypeError, ValueError):
         return default
 
 
 def write_int(path, value):
+    """Returns None on success or the errno string, so callers can report the
+    real reason instead of a generic failure."""
     try:
         with open(path, "w") as fh:
             fh.write(str(value))
+        return None
+    except OSError as exc:
+        return exc.strerror or str(exc)
+
+
+def pct_to_raw(pct, lo, hi):
+    return int(round(lo + (hi - lo) * max(0, min(100, pct)) / 100.0))
+
+
+def raw_to_pct(raw, lo, hi):
+    if raw is None or hi <= lo:
+        return 0
+    return int(round((raw - lo) * 100.0 / (hi - lo)))
+
+
+# --------------------------------------------------------------------- helpers
+def pci_name(slot):
+    """Human name for a PCI device, e.g. 'Radeon RX 6700 XT'."""
+    try:
+        out = subprocess.run(["lspci", "-mm", "-s", slot],
+                             capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    fields = re.findall(r'"([^"]*)"', out.stdout)
+    # class, vendor, device, ...
+    if len(fields) >= 3:
+        vendor, device = fields[1], fields[2]
+        vendor = vendor.split()[0].strip(",")        # "Advanced" / "NVIDIA" / "Intel"
+        inner = re.search(r"\[([^\]]+)\]\s*$", device)
+        if inner:
+            device = inner.group(1)
+        # lspci carries marketing and stepping noise that only makes the menu
+        # wider: "GeForce RTX 3060 Ti Lite Hash Rate" -> "GeForce RTX 3060 Ti"
+        for noise in ("Lite Hash Rate", "LHR", "OEM"):
+            device = device.replace(noise, "")
+        device = re.sub(r"\s*\(rev [^)]*\)", "", device)
+        device = re.sub(r"\s{2,}", " ", device).strip(" /-")
+        if vendor.lower().startswith(("advanced", "ati")):
+            vendor = "AMD"
+        return ("%s %s" % (vendor, device)).strip()
+    return None
+
+
+def hwmon_of(device_path):
+    """The hwmon directory belonging to a PCI device, if it has one."""
+    for h in sorted(glob.glob(os.path.join(device_path, "hwmon", "hwmon*"))):
+        return h
+    return None
+
+
+def is_gpu_hwmon(hwmon_path):
+    dev = os.path.realpath(os.path.join(hwmon_path, "device"))
+    return os.path.isdir(os.path.join(dev, "drm"))
+
+
+# -------------------------------------------------------------------- backends
+class Backend:
+    kind = "unknown"
+    control = False
+
+    def status(self):
+        raise NotImplementedError
+
+    def set(self, value):
+        return False, "this device cannot be controlled"
+
+
+class HwmonPwm(Backend):
+    """Any chip exposing pwmN/pwmN_enable: motherboard Super I/O, AMD and Intel
+    GPUs all speak this. The per-vendor differences live in the enable values,
+    which is why they are attributes rather than constants."""
+
+    kind = "hwmon"
+    control = True
+    # what to write to pwmN_enable for each mode
+    ENABLE_MANUAL = 1
+    ENABLE_AUTO = 2
+    ENABLE_FULL = None      # None -> use manual at maximum instead
+
+    def __init__(self, path, channels):
+        self.path = path
+        self.channels = channels
+
+    def _f(self, name, ch):
+        return os.path.join(self.path, name % ch)
+
+    def _bounds(self, ch):
+        lo = read_int(self._f("pwm%d_min", ch), 0) or 0
+        hi = read_int(self._f("pwm%d_max", ch), 255) or 255
+        if hi <= lo:
+            lo, hi = 0, 255
+        return lo, hi
+
+    def fans(self):
+        out = []
+        for ch in self.channels:
+            rpm = read_int(self._f("fan%d_input", ch))
+            out.append({
+                "channel": ch,
+                "pwm": read_int(self._f("pwm%d", ch)),
+                "enable": read_int(self._f("pwm%d_enable", ch)),
+                "rpm": rpm,
+                "connected": bool(rpm),
+            })
+        return out
+
+    def status(self):
+        fans = self.fans()
+        live = [f for f in fans if f["connected"]] or fans
+        ref = live[0] if live else {"pwm": 0, "enable": self.ENABLE_MANUAL}
+        lo, hi = self._bounds(ref.get("channel", self.channels[0]))
+        enable = ref.get("enable")
+
+        if enable == self.ENABLE_AUTO or (enable is not None and enable > 2):
+            mode = "auto"
+        elif self.ENABLE_FULL is not None and enable == self.ENABLE_FULL:
+            mode = "full"
+        else:
+            mode = "manual"
+
+        percent = 100 if mode == "full" else raw_to_pct(ref.get("pwm"), lo, hi)
+        return {
+            "fans": fans,
+            "rpms": [f["rpm"] for f in fans if f["connected"]],
+            "percent": percent,
+            "mode": mode,
+            "range": [0, 100],
+        }
+
+    def set(self, value):
+        errors = []
+        for ch in self.channels:
+            en, pw = self._f("pwm%d_enable", ch), self._f("pwm%d", ch)
+            lo, hi = self._bounds(ch)
+            if value == "auto":
+                err = write_int(en, self.ENABLE_AUTO)
+                if err:
+                    errors.append(err)
+                continue
+            pct = int(value)
+            if pct >= 100 and self.ENABLE_FULL is not None:
+                err = write_int(en, self.ENABLE_FULL) or write_int(pw, hi)
+            else:
+                err = write_int(en, self.ENABLE_MANUAL) or write_int(pw, pct_to_raw(pct, lo, hi))
+            if err:
+                errors.append(err)
+        if errors and len(errors) == len(self.channels):
+            return False, errors[0]
+        return True, None
+
+
+class SuperIO(HwmonPwm):
+    """Motherboard headers. On the nct6775 family, enable 0 bypasses the curve
+    and drives the fan flat out, which is what 100% should mean here."""
+    ENABLE_FULL = 0
+    ENABLE_AUTO = 5         # Smart Fan IV; falls back to 2 below
+
+    def set(self, value):
+        ok, err = super().set(value)
+        if not ok and value == "auto":
+            self.ENABLE_AUTO = 2
+            return super().set(value)
+        return ok, err
+
+
+class AmdGpu(HwmonPwm):
+    """amdgpu exposes the standard hwmon pwm interface. On some RDNA3 boards the
+    firmware refuses manual control; the write fails and we surface the errno
+    rather than pretending it worked."""
+    ENABLE_FULL = None      # 0 means "no fan speed control", not "full" -- avoid it
+
+    def set(self, value):
+        ok, err = super().set(value)
+        if not ok:
+            return False, ("%s -- this card's firmware may not allow manual fan "
+                           "control (common on RX 7000)" % err)
+        return ok, err
+
+
+class MonitorOnly(Backend):
+    """Reports speed but cannot set it: Intel's i915 exposes fan1_input only,
+    and PWM control in the xe driver is not in mainline yet."""
+
+    kind = "monitor"
+    control = False
+
+    def __init__(self, path, reason):
+        self.path = path
+        self.reason = reason
+
+    def status(self):
+        rpms = []
+        for f in sorted(glob.glob(os.path.join(self.path, "fan[0-9]_input"))):
+            v = read_int(f)
+            if v is not None:
+                rpms.append(v)
+        return {"fans": [], "rpms": rpms, "percent": 0,
+                "mode": "auto", "range": [0, 100], "reason": self.reason}
+
+
+class NvidiaGpu(Backend):
+    """NVIDIA exposes no hwmon at all, so everything goes through
+    nvidia-settings, which needs the user's X/XWayland session."""
+
+    kind = "nvidia"
+    control = True
+
+    def __init__(self, index=0):
+        self.index = index
+
+    def _env(self):
+        env = dict(os.environ)
+        env["DISPLAY"] = env.get("DISPLAY", ":0")
+        # resolved fresh every call: right after boot the file may not exist yet
+        xauth = sorted(glob.glob("/run/user/*/xauth_*"),
+                       key=os.path.getmtime, reverse=True)
+        if xauth:
+            env["XAUTHORITY"] = xauth[0]
+        return env
+
+    def _ns(self, args):
+        try:
+            return subprocess.run(["nvidia-settings"] + args, env=self._env(),
+                                  capture_output=True, text=True, timeout=15)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
+    def _smi(self, query):
+        try:
+            out = subprocess.run(
+                ["nvidia-smi", "-i", str(self.index),
+                 "--query-gpu=" + query, "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return out.stdout.strip() if out.returncode == 0 else None
+
+    def bounds(self):
+        """Ask the driver for its own limits. GeForce cards refuse anything
+        under ~30%, and nvidia-settings exits 0 even when it refuses -- so a
+        request outside the range would look like success while nothing moved."""
+        r = self._ns(["-q", "[fan:0]/GPUTargetFanSpeed"])
+        if r and r.returncode == 0:
+            m = re.search(r"range\s+(\d+)\s*-\s*(\d+)", r.stdout)
+            if m:
+                return int(m.group(1)), int(m.group(2))
+        return 30, 100
+
+    def target(self):
+        r = self._ns(["-q", "[fan:0]/GPUTargetFanSpeed"])
+        if r and r.returncode == 0:
+            m = re.search(r"GPUTargetFanSpeed'\s*\([^)]*\):\s*(\d+)", r.stdout)
+            if m:
+                return int(m.group(1))
+        return None
+
+    def status(self):
+        line = self._smi("fan.speed,temperature.gpu,utilization.gpu")
+        if not line:
+            return {"fans": [], "rpms": [], "percent": 0, "mode": "auto",
+                    "range": [30, 100], "reason": "nvidia-smi not responding"}
+        speed, temp, util = [p.strip() for p in line.split(",")]
+
+        r = self._ns(["-q", "[gpu:0]/GPUFanControlState"])
+        manual = bool(r and ": 1." in r.stdout)
+
+        # nvidia-smi only reports a percentage; the tachometer lives in
+        # nvidia-settings, one value per physical fan.
+        rpms = []
+        for fan in range(4):
+            q = self._ns(["-q", "[fan:%d]/GPUCurrentFanSpeedRPM" % fan])
+            if not q or q.returncode != 0:
+                continue
+            for ln in q.stdout.splitlines():
+                if "GPUCurrentFanSpeedRPM" in ln and "):" in ln:
+                    digits = ln.rsplit("):", 1)[1].strip().rstrip(".")
+                    if digits.isdigit():
+                        rpms.append(int(digits))
+                    break
+
+        return {
+            "fans": [], "rpms": rpms,
+            "percent": int(speed) if speed.isdigit() else 0,
+            "temp": int(temp) if temp.isdigit() else None,
+            "util": int(util) if util.isdigit() else 0,
+            "mode": "manual" if manual else "auto",
+            "range": list(self.bounds()),
+        }
+
+    def set(self, value):
+        if value == "auto":
+            r = self._ns(["-a", "[gpu:0]/GPUFanControlState=0"])
+            ok = r is not None and r.returncode == 0
+            return ok, (None if ok else "nvidia-settings failed")
+
+        want = int(value)
+        lo, hi = self.bounds()
+        pct = max(lo, min(hi, want))
+
+        r = self._ns(["-a", "[gpu:0]/GPUFanControlState=1"])
+        if r is None or r.returncode != 0:
+            return False, "could not enable manual fan control"
+        for fan in range(3):
+            self._ns(["-a", "[fan:%d]/GPUTargetFanSpeed=%d" % (fan, pct)])
+
+        got = self.target()      # exit codes from nvidia-settings mean nothing
+        if got is None:
+            return False, "could not read the fan speed back"
+        if got != pct:
+            return False, "the driver kept %d%% (asked for %d%%)" % (got, pct)
+        if pct != want:
+            return True, "clamped to %d%%: this GPU accepts %d-%d%%" % (pct, lo, hi)
+        return True, None
+
+
+# ------------------------------------------------------------------ temperature
+def hwmon_temp(path, prefer=()):
+    """Best temperature from a hwmon directory, preferring named sensors."""
+    labelled, plain = {}, []
+    for inp in sorted(glob.glob(os.path.join(path, "temp[0-9]*_input"))):
+        val = read_int(inp)
+        if val is None:
+            continue
+        val = round(val / 1000.0)
+        name = read_text(inp.replace("_input", "_label"))
+        if name:
+            labelled[name] = val
+        else:
+            plain.append(val)
+    for key in prefer:
+        if key in labelled:
+            return labelled[key]
+    if labelled:
+        return sorted(labelled.values())[-1]
+    return plain[0] if plain else None
+
+
+def cpu_temp():
+    """CPU package temperature, whichever driver reports it."""
+    for path in sorted(glob.glob(os.path.join(SYSFS_HWMON, "hwmon*"))):
+        name = read_text(os.path.join(path, "name"))
+        if name in ("k10temp", "coretemp", "zenpower"):
+            t = hwmon_temp(path, prefer=("Tctl", "Tdie", "Package id 0", "Tccd1"))
+            if t is not None:
+                return t
+    return None
+
+
+# -------------------------------------------------------------------- discovery
+def discover():
+    devices = []
+
+    # --- motherboard headers: any hwmon with pwm channels that is not a GPU ---
+    for path in sorted(glob.glob(os.path.join(SYSFS_HWMON, "hwmon*"))):
+        channels = sorted(int(p[-1]) for p in glob.glob(os.path.join(path, "pwm[0-9]")))
+        if not channels or is_gpu_hwmon(path):
+            continue
+        name = read_text(os.path.join(path, "name")) or "hwmon"
+        devices.append({
+            "id": "mb:%s" % name,
+            "label": "CPU / case",
+            "detail": name,
+            "kind": "motherboard",
+            "backend": SuperIO(path, channels),
+            "temp_fn": cpu_temp,
+        })
+
+    # --- GPUs ---
+    for card in sorted(glob.glob(os.path.join(SYSFS_DRM, "card[0-9]*"))):
+        if "-" in os.path.basename(card):        # card1-DP-1 and friends
+            continue
+        dev = os.path.realpath(os.path.join(card, "device"))
+        if not os.path.isdir(dev):
+            continue
+        driver = os.path.basename(os.path.realpath(os.path.join(dev, "driver")))
+        slot = os.path.basename(dev)
+        label = pci_name(slot.replace("0000:", "")) or driver
+        dev_id = "gpu:%s" % slot
+
+        if driver == "nvidia":
+            if subprocess.run(["which", "nvidia-smi"],
+                              capture_output=True).returncode == 0:
+                devices.append({
+                    "id": dev_id, "label": label, "detail": driver,
+                    "kind": "gpu", "backend": NvidiaGpu(), "temp_fn": None,
+                })
+            continue
+
+        hw = hwmon_of(dev)
+        if not hw:
+            continue
+        channels = sorted(int(p[-1]) for p in glob.glob(os.path.join(hw, "pwm[0-9]")))
+        has_tach = bool(glob.glob(os.path.join(hw, "fan[0-9]_input")))
+
+        if channels:
+            backend = AmdGpu(hw, channels) if driver == "amdgpu" else HwmonPwm(hw, channels)
+        elif has_tach:
+            reason = ("the %s driver reports fan speed but exposes no PWM control"
+                      % driver)
+            backend = MonitorOnly(hw, reason)
+        else:
+            continue                              # no fan at all (most iGPUs)
+
+        devices.append({
+            "id": dev_id, "label": label, "detail": driver, "kind": "gpu",
+            "backend": backend,
+            "temp_fn": (lambda p=hw: hwmon_temp(p, prefer=("edge", "junction"))),
+        })
+
+    return devices
+
+
+def device_status(dev):
+    st = dict(dev["backend"].status())
+    st.update({
+        "id": dev["id"], "label": dev["label"], "detail": dev["detail"],
+        "kind": dev["kind"], "control": dev["backend"].control,
+    })
+    if dev.get("temp_fn") and st.get("temp") is None:
+        st["temp"] = dev["temp_fn"]()
+    return st
+
+
+# ------------------------------------------------------------------------ state
+def state_load():
+    try:
+        with open(STATE) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def state_save(data):
+    """Silently a no-op when unprivileged: `status` is meant to run as the user
+    and must never fail because it cannot write."""
+    if os.geteuid() != 0:
+        return False
+    try:
+        os.makedirs(os.path.dirname(STATE), exist_ok=True)
+        with open(STATE, "w") as fh:
+            json.dump(data, fh, indent=2, sort_keys=True)
+            fh.write("\n")
         return True
     except OSError:
         return False
 
 
-def cpu_temp():
-    """Package temperature from k10temp: Tctl is what the fan curve follows."""
-    for path in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
-        try:
-            with open(os.path.join(path, "name")) as fh:
-                if fh.read().strip() != "k10temp":
-                    continue
-        except OSError:
+def migrate_state(devices):
+    """Older versions keyed the saved speeds as "cpu" and "gpu". Map them onto
+    the discovered device ids once, so an upgrade keeps the user's choice."""
+    if os.geteuid() != 0:
+        return
+    saved = state_load()
+    if not ({"cpu", "gpu"} & set(saved)):
+        return
+    for legacy, kind in (("cpu", "motherboard"), ("gpu", "gpu")):
+        value = saved.pop(legacy, None)
+        if value is None:
             continue
-        best = {}
-        for lbl in glob.glob(os.path.join(path, "temp*_label")):
-            try:
-                with open(lbl) as fh:
-                    name = fh.read().strip()
-            except OSError:
-                continue
-            val = read_int(lbl.replace("_label", "_input"))
-            if val is not None:
-                best[name] = round(val / 1000.0)
-        for key in ("Tctl", "Tccd1", "Tdie"):
-            if key in best:
-                return best[key]
-    return None
+        match = next((d for d in devices if d["kind"] == kind), None)
+        if match and match["id"] not in saved:
+            saved[match["id"]] = value
+    state_save(saved)
 
 
-def cpu_status():
-    base = hwmon()
-    if not base:
-        return {"available": False, "reason": "no nct6xxx chip found"}
-    fans = []
-    for i in pwm_channels(base):
-        rpm = read_int(os.path.join(base, "fan%d_input" % i))
-        fans.append({
-            "channel": i,
-            "pwm": read_int(os.path.join(base, "pwm%d" % i)),
-            "enable": read_int(os.path.join(base, "pwm%d_enable" % i)),
-            "rpm": rpm,
-            "connected": bool(rpm),
-        })
-    live = [f for f in fans if f["connected"]]
-    pwm = live[0]["pwm"] if live else (fans[0]["pwm"] if fans else 0)
-    enable = live[0]["enable"] if live else (fans[0]["enable"] if fans else 1)
-    return {
-        "available": True,
-        "chip": os.path.basename(base),
-        "fans": fans,
-        "temp": cpu_temp(),
-        # enable 0 is the chip's "full speed" mode: the curve is bypassed
-        "percent": 100 if enable == 0 else round((pwm or 0) * 100 / 255),
-        "mode": "full" if enable == 0 else ("manual" if enable == 1 else "auto"),
-    }
-
-
-def cpu_set(value):
-    base = hwmon()
-    if not base:
-        return False, "no nct6xxx chip found"
-    channels = pwm_channels(base)
-    if not channels:
-        return False, "chip exposes no pwm channels"
-
-    for i in channels:
-        en = os.path.join(base, "pwm%d_enable" % i)
-        pw = os.path.join(base, "pwm%d" % i)
-        if value == "auto":
-            # 5 = Smart Fan IV (what the BIOS uses); 2 = thermal cruise fallback
-            if not write_int(en, 5):
-                write_int(en, 2)
-        elif int(value) >= 100:
-            write_int(en, 0)          # full speed, curve bypassed
-            write_int(pw, 255)
-        else:
-            write_int(en, 1)          # manual
-            write_int(pw, round(int(value) * 255 / 100))
-    return True, None
-
-
-# ---------------------------------------------------------------------- nvidia
-def nvidia_env():
-    """nvidia-settings needs the user's X/XWayland session. The xauth file may
-    not exist yet right after boot, so resolve it fresh on every call."""
-    env = dict(os.environ)
-    env["DISPLAY"] = env.get("DISPLAY", ":0")
-    xauth = sorted(glob.glob("/run/user/*/xauth_*"), key=os.path.getmtime, reverse=True)
-    if xauth:
-        env["XAUTHORITY"] = xauth[0]
-    return env
-
-
-def nvidia_settings(args):
-    try:
-        return subprocess.run(
-            ["nvidia-settings"] + args,
-            env=nvidia_env(), capture_output=True, text=True, timeout=15,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-
-
-def gpu_status():
-    try:
-        out = subprocess.run(
-            ["nvidia-smi",
-             "--query-gpu=fan.speed,temperature.gpu,utilization.gpu",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return {"available": False, "reason": "nvidia-smi not responding"}
-    if out.returncode != 0 or not out.stdout.strip():
-        return {"available": False, "reason": "no NVIDIA GPU"}
-    speed, temp, util = [p.strip() for p in out.stdout.strip().split(",")]
-
-    res = nvidia_settings(["-q", "[gpu:0]/GPUFanControlState"])
-    manual = bool(res and ": 1." in res.stdout)
-
-    # nvidia-smi only reports a percentage; the real tachometer lives in
-    # nvidia-settings as GPUCurrentFanSpeedRPM, one value per physical fan.
-    rpms = []
-    for fan in (0, 1, 2, 3):
-        r = nvidia_settings(["-q", "[fan:%d]/GPUCurrentFanSpeedRPM" % fan])
-        if not r or r.returncode != 0:
-            continue
-        for line in r.stdout.splitlines():
-            if "GPUCurrentFanSpeedRPM" in line and "):" in line:
-                digits = line.rsplit("):", 1)[1].strip().rstrip(".")
-                if digits.isdigit():
-                    rpms.append(int(digits))
-                break
-
-    return {
-        "available": True,
-        "percent": int(speed) if speed.isdigit() else 0,
-        "temp": int(temp) if temp.isdigit() else 0,
-        "util": int(util) if util.isdigit() else 0,
-        "rpms": rpms,
-        "range": list(gpu_range()),
-        "mode": "manual" if manual else "auto",
-    }
-
-
-def gpu_range():
-    """Ask the driver for its own limits.
-
-    GeForce cards refuse anything below ~30%, and nvidia-settings still exits 0
-    when it refuses -- so a request outside the range looks like success while
-    the fan never moves. Never assume 0-100 here.
-    """
-    r = nvidia_settings(["-q", "[fan:0]/GPUTargetFanSpeed"])
-    if r and r.returncode == 0:
-        m = re.search(r"range\s+(\d+)\s*-\s*(\d+)", r.stdout)
-        if m:
-            return int(m.group(1)), int(m.group(2))
-    return 30, 100
-
-
-def gpu_target():
-    r = nvidia_settings(["-q", "[fan:0]/GPUTargetFanSpeed"])
-    if r and r.returncode == 0:
-        m = re.search(r"GPUTargetFanSpeed'\s*\([^)]*\):\s*(\d+)", r.stdout)
-        if m:
-            return int(m.group(1))
-    return None
-
-
-def gpu_set(value):
-    if value == "auto":
-        res = nvidia_settings(["-a", "[gpu:0]/GPUFanControlState=0"])
-        ok = res is not None and res.returncode == 0
-        # The message belongs to the failure branch only. Returning it
-        # unconditionally made a successful switch to Auto report
-        # "nvidia-settings failed" as a note.
-        return ok, (None if ok else "nvidia-settings failed")
-    want = int(value)
-    lo, hi = gpu_range()
-    pct = max(lo, min(hi, want))
-
-    res = nvidia_settings(["-a", "[gpu:0]/GPUFanControlState=1"])
-    if res is None or res.returncode != 0:
-        return False, "could not enable manual fan control"
-    for fan in (0, 1, 2):
-        nvidia_settings(["-a", "[fan:%d]/GPUTargetFanSpeed=%d" % (fan, pct)])
-
-    # read it back: exit codes from nvidia-settings mean nothing here
-    got = gpu_target()
-    if got is None:
-        return False, "could not read the fan speed back"
-    if got != pct:
-        return False, "the driver kept %d%% (asked for %d%%)" % (got, pct)
-
-    # Only say something when the driver actually refused the request. Reading
-    # the fan back right after a change reports a value mid-ramp, so a plain
-    # "set to 100%" would answer "GPU fan is at 68%" while it is still spinning
-    # up. The live reading in the menu covers that.
-    if pct != want:
-        return True, "clamped to %d%%: this GPU accepts %d-%d%%" % (pct, lo, hi)
-    return True, None
-
-
-# ----------------------------------------------------------------------- state
-def state_load():
-    try:
-        with open(STATE) as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
-        return {"cpu": 100, "gpu": 100}
-
-
-def state_save(cpu, gpu):
-    os.makedirs(os.path.dirname(STATE), exist_ok=True)
-    with open(STATE, "w") as fh:
-        json.dump({"cpu": cpu, "gpu": gpu}, fh)
-        fh.write("\n")
-
-
-# ------------------------------------------------------------------------ main
+# ------------------------------------------------------------------------- main
 def main():
     if len(sys.argv) < 2:
-        print("usage: fan-tray-helper status|set|restore|boot", file=sys.stderr)
+        print(__doc__.strip(), file=sys.stderr)
         return 2
     cmd = sys.argv[1]
+    devices = discover()
+    by_id = {d["id"]: d for d in devices}
+    migrate_state(devices)
 
     if cmd == "status":
-        print(json.dumps({"cpu": cpu_status(), "gpu": gpu_status(),
-                          "saved": state_load()}))
+        print(json.dumps({
+            "devices": [device_status(d) for d in devices],
+            "saved": state_load(),
+        }))
         return 0
 
     if cmd == "set" and len(sys.argv) == 4:
-        target, value = sys.argv[2], sys.argv[3]
-        fn = {"cpu": cpu_set, "gpu": gpu_set}.get(target)
-        if not fn:
-            print("target must be cpu or gpu", file=sys.stderr)
+        dev_id, value = sys.argv[2], sys.argv[3]
+        dev = by_id.get(dev_id)
+        if not dev:
+            print("no such device: %s" % dev_id, file=sys.stderr)
             return 2
-        ok, err = fn(value)
-        saved = state_load()
-        saved[target] = value
-        state_save(saved.get("cpu", 100), saved.get("gpu", 100))
-        if not ok:
-            print(err or "failed", file=sys.stderr)
-        elif err:
-            print(err)          # applied, but not exactly what was asked
+        ok, note = dev["backend"].set(value)
+        if ok:
+            saved = state_load()
+            saved[dev_id] = value
+            state_save(saved)
+            if note:
+                print(note)
+        else:
+            print(note or "failed", file=sys.stderr)
         return 0 if ok else 1
+
+    if cmd == "restore":
+        saved = state_load()
+        failed = 0
+        for dev_id, value in saved.items():
+            dev = by_id.get(dev_id)
+            if not dev:
+                continue
+            ok, note = dev["backend"].set(value)
+            print("%s -> %s%s" % (dev_id, value, "" if ok else "  FAILED: %s" % note))
+            failed += 0 if ok else 1
+        return 1 if failed else 0
 
     if cmd == "boot" and len(sys.argv) == 3:
         arg = sys.argv[2]
@@ -308,21 +570,13 @@ def main():
             print(r.stdout.strip() or "disabled")
             return 0
         if arg in ("on", "off"):
-            verb = "enable" if arg == "on" else "disable"
-            r = subprocess.run(["systemctl", verb, BOOT_UNIT],
-                               capture_output=True, text=True)
+            r = subprocess.run(["systemctl", "enable" if arg == "on" else "disable",
+                                BOOT_UNIT], capture_output=True, text=True)
             if r.returncode != 0:
                 print((r.stderr or "").strip(), file=sys.stderr)
             return r.returncode
         print("boot takes on, off or status", file=sys.stderr)
         return 2
-
-    if cmd == "restore":
-        saved = state_load()
-        a, _ = cpu_set(saved.get("cpu", 100))
-        b, _ = gpu_set(saved.get("gpu", 100))
-        print("cpu=%s gpu=%s" % (saved.get("cpu"), saved.get("gpu")))
-        return 0 if (a and b) else 1
 
     print("unknown command", file=sys.stderr)
     return 2
