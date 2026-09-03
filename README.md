@@ -11,12 +11,45 @@ _The nine icon styles, each drawn at runtime._
 
 ## What it does
 
-- Sets motherboard fan headers (via the kernel `hwmon` interface) and the
-  NVIDIA GPU fan (via `nvidia-settings`).
-- Shows live RPM and temperature for both, refreshed every 4 s.
+- Sets motherboard fan headers (through the kernel `hwmon` interface) and AMD or
+  NVIDIA GPU fans.
+- Shows live RPM and temperature for every controller, refreshed every 4 s.
 - Optionally restores your chosen speeds on every boot.
-- Nine hand-drawn fan icons, painted at runtime so they follow your panel's
-  colour in light and dark themes.
+- Checks GitHub and GitLab for a newer release, so you never have to go looking.
+
+## Appearance
+
+Everything is painted at runtime, which is what lets the icon spin at a rate
+taken from the *measured* RPM — it stops only when the fans have actually
+stopped, and turns slowly when they idle at their mechanical minimum.
+
+**15 icon styles** — Classic, Turbine, Pinwheel, Case fan, Blower, Ceiling,
+Impeller, Hex frame, Spiral, Tri-blade, Jet turbine, Cog, Snowflake, Vortex,
+Orbit.
+
+![icons](docs/icons.png)
+
+**11 colour modes** — three of them react to the machine:
+
+| | |
+|---|---|
+| **Follow theme** | monochrome, tracks the panel foreground in light and dark |
+| **Rainbow** | hue cycles continuously |
+| **Rainbow spin** | hue follows the rotation, so the colour turns with the blades |
+| **Prism** | a conical gradient gives every blade its own hue |
+| **Heat** | cyan at 30 °C through red at 90 °C, driven by the hottest device |
+| **Velocity** | blue when idle through red at full speed |
+| Neon pink, Cyan, Lime, Amber, Violet | fixed |
+
+![colours](docs/colours.png)
+
+**7 motions** — Spin, Reverse spin, Pulse, Spin + pulse, Wobble, Tumble, Static.
+Each still reflects how fast the fans are actually running.
+
+**5 frame rates** — 12 to 45 fps. Rotation is defined in degrees per *second*,
+so the visual speed is identical at every rate; only the smoothness changes.
+At 30 fps with the Prism gradient rendering live on every frame, the applet
+costs about 1 % of one core.
 
 ## Supported hardware
 

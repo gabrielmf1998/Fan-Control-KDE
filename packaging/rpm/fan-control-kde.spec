@@ -1,5 +1,5 @@
 Name:           fan-control-kde
-Version:        1.1.1
+Version:        1.2.0
 Release:        1%{?dist}
 Summary:        Tray applet to control CPU, case and NVIDIA GPU fan speed on KDE
 
@@ -66,6 +66,12 @@ gtk-update-icon-cache %{_datadir}/icons/hicolor &>/dev/null || :
 %dir /etc/fan-control-kde
 
 %changelog
+* %s gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com> - 1.2.0-1
+- 15 icon styles, up from 9
+- 11 colour modes including rainbow, prism, and heat/velocity from live sensors
+- 7 motion modes and a selectable frame rate from 12 to 45 fps
+- Check for updates against both GitHub and GitLab from the menu
+
 * %s gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com> - 1.1.1-1
 - Ships its own icon: the referenced sensors-fan does not exist in Breeze
 - Removes the stale fan-tray.desktop left by a pre-packaging install

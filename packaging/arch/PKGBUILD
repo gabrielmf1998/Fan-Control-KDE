@@ -1,6 +1,6 @@
 # Maintainer: gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com>
 pkgname=fan-control-kde
-pkgver=1.1.1
+pkgver=1.2.0
 pkgrel=1
 pkgdesc="Tray applet to control CPU, case and NVIDIA GPU fan speed on KDE"
 arch=('any')
