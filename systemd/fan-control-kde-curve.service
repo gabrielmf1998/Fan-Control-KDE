@@ -1,6 +1,6 @@
 [Unit]
 Description=Fan Control KDE curve daemon
-Documentation=https://github.com/gabrielmf1998/fan-control-kde
+Documentation=https://github.com/gabrielmf1998/Fan-Control-KDE
 After=multi-user.target
 ConditionPathExists=/etc/fan-control-kde/curves.json
 # Only one of these may own the fans at a time.

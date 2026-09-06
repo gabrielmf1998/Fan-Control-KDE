@@ -1,14 +1,14 @@
 #!/bin/sh
 # Fan Control KDE — online installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/gabrielmf1998/fan-control-kde/main/install-online.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/gabrielmf1998/Fan-Control-KDE/main/install-online.sh | sh
 #
 # Works out which package this distribution wants, takes it from the latest
 # release, checks it against the SHA256SUMS published beside it, and installs
 # it. Anything it does not recognise gets the AppImage.
 set -eu
 
-REPO="gabrielmf1998/fan-control-kde"
+REPO="gabrielmf1998/Fan-Control-KDE"
 GITLAB="gabriel17166%2Ffan-control-kde"
 API="https://api.github.com/repos/$REPO/releases/latest"
 GITLAB_API="https://gitlab.com/api/v4/projects/$GITLAB/releases"

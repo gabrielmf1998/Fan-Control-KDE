@@ -1,6 +1,6 @@
 [Unit]
 Description=Re-apply the fan speeds saved by Fan Control KDE
-Documentation=https://github.com/gabrielmf1998/fan-control-kde
+Documentation=https://github.com/gabrielmf1998/Fan-Control-KDE
 # NVIDIA cards are driven through nvidia-settings, which needs the user's X or
 # XWayland session; that appears a little after boot, hence the wait and the
 # retry. Motherboard headers are set long before it and do not care.

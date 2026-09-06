@@ -6,7 +6,7 @@ Release:        1%{?dist}
 Summary:        Tray applet for fan speed, fan curves and temperatures
 
 License:        MIT
-URL:            https://github.com/gabrielmf1998/fan-control-kde
+URL:            https://github.com/gabrielmf1998/Fan-Control-KDE
 Source0:        %{name}-%{version}.tar.gz
 
 BuildArch:      noarch

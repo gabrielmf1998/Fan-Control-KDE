@@ -14,7 +14,7 @@ from pathlib import Path
 
 APP_NAME = "Fan Control"
 APP_ID = "fan-control-kde"
-GITHUB_REPO = "gabrielmf1998/fan-control-kde"
+GITHUB_REPO = "gabrielmf1998/Fan-Control-KDE"
 GITLAB_REPO = "gabriel17166/fan-control-kde"
 PROJECT_URL = f"https://github.com/{GITHUB_REPO}"
 GITLAB_URL = f"https://gitlab.com/{GITLAB_REPO}"

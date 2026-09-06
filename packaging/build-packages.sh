@@ -8,7 +8,7 @@ BIN=fan-control
 VERSION=2.0.0
 RELEASE=1
 MAINT="Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com>"
-URL="https://github.com/gabrielmf1998/fan-control-kde"
+URL="https://github.com/gabrielmf1998/Fan-Control-KDE"
 SUMMARY="Tray applet for fan speed, fan curves and temperatures"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

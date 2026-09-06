@@ -17,7 +17,7 @@ hottest sensor, and follow the panel's own foreground in light and dark themes.
 One line, on Fedora, Debian, Ubuntu, Arch and their derivatives:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/gabrielmf1998/fan-control-kde/main/install-online.sh | sh
+curl -fsSL https://raw.githubusercontent.com/gabrielmf1998/Fan-Control-KDE/main/install-online.sh | sh
 ```
 
 or from the mirror:
@@ -50,7 +50,7 @@ change anything, because every fan control on Linux needs root.
 <summary>Or from a clone</summary>
 
 ```sh
-git clone https://github.com/gabrielmf1998/fan-control-kde
+git clone https://github.com/gabrielmf1998/Fan-Control-KDE
 cd fan-control-kde
 ./install.sh
 ```
