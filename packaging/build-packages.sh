@@ -5,7 +5,7 @@ set -euo pipefail
 
 NAME=fan-control-kde
 BIN=fan-control
-VERSION=2.0.0
+VERSION=2.1.0
 RELEASE=1
 MAINT="Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com>"
 URL="https://github.com/gabrielmf1998/Fan-Control-KDE"
@@ -102,8 +102,13 @@ Description: $SUMMARY
  Calibration sweeps a fan and writes down the duty it actually starts at, which
  is the one thing a curve cannot be guessed without.
  .
- 31 icon shapes, 29 animations, a colour and an animation per state, a number
- badge, and a rotor that turns at a rate taken from the measured rpm.
+ 53 icon shapes - 30 of them fan rotors, from a three-blade classic through
+ sickle, scythe and maple blades to a squirrel cage, a bladeless ring and a
+ counter-rotating pair - and 44 animations, including motion blur that smears
+ the trailing edge across a real arc the way a fast fan actually looks.
+ .
+ A colour and an animation per state, a number badge, and a rotor that turns at
+ a rate taken from the measured rpm.
 CONTROL
     cat > "$DEB/DEBIAN/conffiles" <<'CONFFILES'
 /etc/polkit-1/rules.d/49-fan-control-kde.rules

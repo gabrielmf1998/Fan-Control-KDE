@@ -1,6 +1,6 @@
 # Maintainer: gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com>
 pkgname=fan-control-kde
-pkgver=2.0.0
+pkgver=2.1.0
 pkgrel=1
 pkgdesc="Tray applet for fan speed, fan curves and temperatures"
 arch=('any')

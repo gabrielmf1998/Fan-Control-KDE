@@ -1,7 +1,7 @@
 %global bin fan-control
 
 Name:           fan-control-kde
-Version:        2.0.0
+Version:        2.1.0
 Release:        1%{?dist}
 Summary:        Tray applet for fan speed, fan curves and temperatures
 
@@ -40,8 +40,12 @@ runs with nothing loaded at all.
 Calibration sweeps a fan and writes down the duty it actually starts turning at,
 which is the one thing a curve cannot be guessed without.
 
-31 icon shapes, 29 animations, a colour and an animation per state, a number
-badge on the icon, and a rotor that turns at a rate taken from the measured rpm.
+53 icon shapes, 30 of them fan rotors - a three-blade classic, sickle, scythe
+and maple blades, a squirrel cage, a bladeless ring, a counter-rotating pair -
+and 44 animations, including motion blur that smears the trailing edge across a
+real arc the way a fast fan actually looks. A colour and an animation per state,
+a number badge on the icon, and a rotor that turns at a rate taken from the
+measured rpm.
 
 Privileged work goes through two polkit actions on two helpers: one for fans,
 which the shipped rules file lets wheel through without a prompt, and a separate
@@ -126,6 +130,16 @@ gtk-update-icon-cache %{_datadir}/icons/hicolor &>/dev/null || :
 %dir %{_sysconfdir}/fan-control-kde
 
 %changelog
+* Sat Sep 05 2026 Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com> - 2.1.0-1
+- 22 more icon shapes, all of them fans: paddle, 7/9/11-blade axial, sickle,
+  scythe, maple, helix, star, turbofan, shrouded, ducted, squirrel cage, water
+  wheel, a 4-pin case fan, a wire cage, a desk fan, an exhaust fan, a
+  cross-flow drum, a bladeless ring, a counter-rotating pair and a heatpipe
+  cooler - 53 in total, 30 of them rotors
+- 15 more animations, including motion blur and a long blur trail that smear
+  the trailing edge across a real arc, an oscillating-fan swing, wind up and
+  wind down, brake and go, judder, flicker, elastic and tilt - 44 in total
+
 * Sat Sep 05 2026 Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com> - 2.0.0-1
 - Fan curves, drawn on a graph and run by a system service: hysteresis, split
   ramp rates, a spin-up kick and a zero-rpm cut-off

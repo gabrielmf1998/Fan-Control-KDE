@@ -34,9 +34,9 @@ release, checks it against the `SHA256SUMS` published beside it, and installs it
 
 | Distribution | File |
 | --- | --- |
-| Fedora, RHEL, Nobara | `fan-control-kde-2.0.0-1.fc*.noarch.rpm` |
-| Debian, Ubuntu, Mint | `fan-control-kde_2.0.0-1_all.deb` |
-| Arch, Manjaro, CachyOS | `fan-control-kde-2.0.0-1-any.pkg.tar.zst` |
+| Fedora, RHEL, Nobara | `fan-control-kde-2.1.0-1.fc*.noarch.rpm` |
+| Debian, Ubuntu, Mint | `fan-control-kde_2.1.0-1_all.deb` |
+| Arch, Manjaro, CachyOS | `fan-control-kde-2.1.0-1-any.pkg.tar.zst` |
 | Anything else | `Fan-Control-KDE-x86_64.AppImage` |
 
 The AppImage needs `python3` and `PySide6` on the system, and it **cannot ship
@@ -210,18 +210,43 @@ booting, and in any other operating system on it. *Undo that* hands the fan back
 
 ## The rest of it
 
-![States](docs/states.png)
+![Icon shapes](docs/icon-styles.png)
 
-**31 icon shapes** — fans, propellers, turbines, a radiator, a tower cooler, an
-AIO pump, a CPU, a graphics card, and meters that show a reading instead of
-turning: a dial, a ring, bars, a thermometer, a plain number.
+**53 icon shapes, 30 of them fan rotors.** Three-blade classic, tri-blade,
+pinwheel, propeller, paddle, axial in 7, 9 and 11 blades, sickle and scythe and
+maple blades, a helix, a star, a turbine, a turbofan, a jet turbine, a shrouded
+rotor, a ducted fan, a blower, a squirrel cage, a water wheel, an impeller, a
+spiral, a vortex, a ceiling fan, a windmill, leaf blades.
+
+Then **17 housings**, where the frame stays still and only the rotor turns: a
+case fan, a case fan with its 4-pin tail, hex and round frames, a wire cage, a
+desk fan on its stand, a wall exhaust fan, a cross-flow drum, a bladeless ring, a
+counter-rotating pair, twin fans, a radiator, a tower cooler, a heatpipe cooler,
+an AIO pump, a CPU and a graphics card.
+
+And **six meters** that show a reading instead of turning: a heatsink, a dial, a
+ring, bars, a thermometer and a plain number.
+
+![The same shapes at panel size](docs/icon-styles-22px.png)
+
+Every one of them is drawn to survive 22 px, because that is the only size that
+actually matters.
 
 ![Animations](docs/animations.png)
 
-**29 animations** — including a few that only make sense here: *Rev* surges and
-settles the way a fan ramps under load, *Gusts* buffets it, *Stutter* strobes it,
-*Airflow* sweeps arcs off the blade tips, and *Glow with the heat* brightens with
-the hottest sensor.
+**44 animations.** The ones worth naming are the ones that only make sense on a
+fan: **Motion blur** and **Long blur trail** smear the trailing edge across a
+real arc — a few degrees of smear vanishes behind the blade in front of it, so
+these use a wide one, and on a dense rotor they fill into the near-solid disc a
+fast fan actually looks like. **Swing** turns the blades while the whole head
+sweeps, like an oscillating fan. **Rev** surges and settles the way a fan ramps
+under load; **Wind up** and **Wind down** run the whole range; **Brake and go**
+stops it dead for a beat. **Gusts** buffets it, **Stutter** and **Strobed spin**
+freeze it the way a camera does, **Judder** shakes it with no period the eye can
+lock on to, **Airflow** sweeps arcs off the blade tips, and **Glow with the
+heat** brightens with the hottest sensor.
+
+![States](docs/states.png)
 
 **Nine states**, each with its own colour and its own animation, resolved top to
 bottom so a machine that is too hot says so even while its fans sit at 40%:

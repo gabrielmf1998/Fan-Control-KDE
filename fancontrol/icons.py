@@ -31,13 +31,28 @@ from PySide6.QtGui import (
 )
 
 ICON_STYLES = [
+    # ---- rotors: the fan itself, turning -----------------------------------
     ("classic",     "Classic"),
     ("triblade",    "Tri-blade"),
     ("pinwheel",    "Pinwheel"),
     ("propeller",   "Propeller"),
+    ("paddle",      "Paddle blades"),
+    ("axial7",      "Axial, 7 blades"),
+    ("axial9",      "Axial, 9 blades"),
+    ("slimfan",     "Slim, 11 blades"),
+    ("sickle",      "Sickle blades"),
+    ("scythe",      "Scythe blades"),
+    ("maple",       "Maple blades"),
+    ("helix",       "Helix"),
+    ("starfan",     "Star rotor"),
     ("turbine",     "Turbine"),
+    ("turbofan",    "Turbofan"),
     ("jet",         "Jet turbine"),
+    ("ringfan",     "Shrouded rotor"),
+    ("ducted",      "Ducted fan"),
     ("blower",      "Blower"),
+    ("squirrel",    "Squirrel cage"),
+    ("waterwheel",  "Water wheel"),
     ("impeller",    "Impeller"),
     ("spiral",      "Spiral"),
     ("vortex",      "Vortex"),
@@ -47,16 +62,26 @@ ICON_STYLES = [
     ("snowflake",   "Snowflake"),
     ("cog",         "Cog"),
     ("orbit",       "Orbit"),
+    # ---- framed: the housing stays still, the rotor turns -------------------
     ("casefan",     "Case fan"),
+    ("pwmfan",      "Case fan, 4-pin"),
     ("hexfan",      "Hex frame"),
     ("roundfan",    "Round frame"),
+    ("caged",       "Wire cage"),
+    ("deskfan",     "Desk fan"),
+    ("exhaust",     "Exhaust fan"),
+    ("crossflow",   "Cross-flow drum"),
+    ("bladeless",   "Bladeless"),
+    ("stacked",     "Counter-rotating"),
     ("dualfan",     "Twin fans"),
     ("radiator",    "Radiator"),
     ("tower",       "Tower cooler"),
+    ("heatpipe",    "Heatpipe cooler"),
     ("aio",         "AIO pump"),
-    ("heatsink",    "Heatsink"),
     ("cpu",         "CPU with fan"),
     ("gpu",         "Graphics card"),
+    # ---- meters: a reading rather than a rotation ---------------------------
+    ("heatsink",    "Heatsink"),
     ("gauge",       "Dial gauge"),
     ("ring",        "Ring meter"),
     ("bars",        "Speed bars"),
@@ -65,15 +90,16 @@ ICON_STYLES = [
 ]
 
 # Shapes whose frame stays still while only the rotor turns.
-FRAMED_STYLES = {"casefan", "hexfan", "roundfan", "dualfan", "radiator",
-                 "tower", "aio", "cpu", "gpu"}
+FRAMED_STYLES = {"casefan", "pwmfan", "hexfan", "roundfan", "caged", "deskfan",
+                 "exhaust", "crossflow", "bladeless", "stacked", "dualfan",
+                 "radiator", "tower", "heatpipe", "aio", "cpu", "gpu"}
 
 # Shapes that show a reading rather than a rotation; spinning them is nonsense.
 METER_STYLES = {"gauge", "ring", "bars", "thermometer", "number", "heatsink"}
 
 # Shapes that paint right up to their box, so scaling past the cell only crops.
-EDGE_TO_EDGE_STYLES = {"casefan", "radiator", "tower", "aio", "cpu", "gpu",
-                       "heatsink"}
+EDGE_TO_EDGE_STYLES = {"casefan", "pwmfan", "exhaust", "crossflow", "radiator",
+                       "tower", "heatpipe", "aio", "cpu", "gpu", "heatsink"}
 
 ANIMATIONS = [
     ("none",        "None"),
@@ -105,11 +131,28 @@ ANIMATIONS = [
     ("rainbow",     "Rainbow hue"),
     ("hot_glow",    "Glow with the heat"),
     ("fast_spin",   "Spin, faster with the fans"),
+    ("blur",        "Motion blur"),
+    ("trail",       "Long blur trail"),
+    ("swing",       "Swing - an oscillating fan"),
+    ("oscillate",   "Oscillate side to side"),
+    ("windup",      "Wind up"),
+    ("winddown",    "Wind down"),
+    ("brake",       "Brake and go"),
+    ("dual_dir",    "Reverse every half turn"),
+    ("strobe_spin", "Strobed spin"),
+    ("judder",      "Judder"),
+    ("flicker",     "Flicker"),
+    ("zoom",        "Zoom"),
+    ("elastic",     "Elastic"),
+    ("pop",         "Pop"),
+    ("tilt",        "Tilt"),
 ]
 
 # Animations that carry the rotor round rather than shaking it in place.
 ROTATING = {"spin", "spin_reverse", "spin_pulse", "spin_glow", "rev", "gust",
-            "stutter", "tumble", "fast_spin", "drift"}
+            "stutter", "tumble", "fast_spin", "drift", "blur", "trail",
+            "swing", "windup", "winddown", "brake", "dual_dir", "strobe_spin",
+            "judder", "tilt"}
 
 BADGE_STYLES = [
     ("circle", "Circle"),
@@ -166,6 +209,11 @@ class AnimState:
     shimmer: float = -1.0
     scan: float = -1.0
     hue_shift: float = 0.0
+    # (angle offset, alpha multiplier) drawn behind the shape, newest last.
+    # This is how a fan is made to look like it is moving in a still frame:
+    # the eye reads a smear of trailing copies as speed far more readily than
+    # it reads a single blade at a different angle.
+    ghosts: tuple = ()
     extra: dict = field(default_factory=dict)
 
 
@@ -249,6 +297,52 @@ def anim_state(animation: str, phase: float, ctx: RenderCtx) -> AnimState:
         st.glow = 0.15 + 0.85 * heat * (0.55 + 0.45 * wave)
     elif animation == "fast_spin":
         st.spin = 1.0 + 1.6 * ctx.factor
+    elif animation == "blur":
+        # Wide offsets on purpose. A few degrees of smear disappears behind the
+        # solid blade in front of it; what reads as speed is a trailing edge
+        # spread across a real arc.
+        st.spin = 1.0
+        st.ghosts = ((-16.0, 0.42), (-30.0, 0.24), (-44.0, 0.12))
+    elif animation == "trail":
+        st.spin = 1.0
+        st.ghosts = tuple((-14.0 * (i + 1), 0.46 * (0.68 ** i)) for i in range(6))
+    elif animation == "swing":
+        # blades turning while the whole head sweeps, like an oscillating fan
+        st.spin = 1.0
+        st.dx = 0.07 * math.sin(t * 2 * math.pi)
+        st.rotation = 7.0 * math.sin(t * 2 * math.pi)
+    elif animation == "oscillate":
+        st.dx = 0.09 * math.sin(t * 2 * math.pi)
+    elif animation == "windup":
+        st.spin = 0.15 + 1.85 * t
+    elif animation == "winddown":
+        st.spin = 2.0 - 1.85 * t
+    elif animation == "brake":
+        # runs, stops dead for a beat, runs again
+        st.spin = 0.0 if 0.42 < t < 0.58 else 1.0 + 0.4 * math.cos(t * 2 * math.pi)
+    elif animation == "dual_dir":
+        st.spin = 1.0 if t < 0.5 else -1.0
+    elif animation == "strobe_spin":
+        st.spin = 1.0
+        st.alpha = 1.0 if (t * 6.0) % 1.0 < 0.62 else 0.30
+    elif animation == "judder":
+        # deterministic, but with no period the eye can lock on to
+        st.spin = 1.0
+        st.rotation = 5.0 * math.sin(t * 61.0) * math.sin(t * 17.0)
+        st.dy = 0.012 * math.sin(t * 43.0)
+    elif animation == "flicker":
+        st.alpha = 0.45 + 0.55 * abs(math.sin(t * 23.0) * math.sin(t * 7.0))
+    elif animation == "zoom":
+        st.scale = 0.68 + 0.42 * wave
+    elif animation == "elastic":
+        # overshoots and settles, rather than easing politely
+        st.scale = 1.0 + 0.24 * math.sin(t * 6 * math.pi) * (1.0 - t) ** 1.6
+    elif animation == "pop":
+        st.scale = 1.0 + (0.28 * math.sin(t / 0.18 * math.pi) if t < 0.18 else 0.0)
+    elif animation == "tilt":
+        # squashed vertically as if seen from above, and turning
+        st.spin = 1.0
+        st.extra["squash"] = 0.55 + 0.45 * abs(math.cos(t * 2 * math.pi))
 
     return st
 
@@ -521,6 +615,195 @@ def _rotor_orbit(p, r, c, ctx):
     _hub(p, r, c, 0.26)
 
 
+
+# --- more rotors ------------------------------------------------------------
+def _rotor_paddle(p, r, c, ctx):
+    """Four flat paddles on a hub, the way a pedestal fan looks head-on."""
+    p.setPen(Qt.NoPen)
+    p.setBrush(QBrush(c))
+    for i in range(4):
+        p.save()
+        p.rotate(i * 90.0 + 20)
+        p.drawRoundedRect(QRectF(r * 0.22, -r * 0.30, r * 0.76, r * 0.60),
+                          r * 0.16, r * 0.16)
+        p.restore()
+    _hub(p, r, c, 0.24)
+
+
+def _rotor_axial7(p, r, c, ctx):
+    _blades(p, r, 7, 44, 30, r * 0.22, c)
+    _hub(p, r, c, 0.24)
+
+
+def _rotor_axial9(p, r, c, ctx):
+    _blades(p, r, 9, 34, 26, r * 0.24, c)
+    _hub(p, r, c, 0.26)
+
+
+def _rotor_slimfan(p, r, c, ctx):
+    _blades(p, r, 11, 24, 20, r * 0.26, c)
+    _hub(p, r, c, 0.28)
+
+
+def _rotor_sickle(p, r, c, ctx):
+    """Backswept sickle blades: the shape a quiet static-pressure fan uses."""
+    p.setPen(Qt.NoPen)
+    p.setBrush(QBrush(c))
+    for i in range(5):
+        p.save()
+        p.rotate(i * 72.0)
+        path = QPainterPath()
+        path.moveTo(r * 0.20, -r * 0.06)
+        path.cubicTo(r * 0.62, -r * 0.34, r * 0.94, -r * 0.30, r * 0.99, r * 0.04)
+        path.cubicTo(r * 0.80, r * 0.30, r * 0.46, r * 0.34, r * 0.18, r * 0.22)
+        path.closeSubpath()
+        p.drawPath(path)
+        p.restore()
+    _hub(p, r, c, 0.22)
+
+
+def _rotor_scythe(p, r, c, ctx):
+    """Five long thin blades, tapering to a point at the tip."""
+    p.setPen(Qt.NoPen)
+    p.setBrush(QBrush(c))
+    for i in range(5):
+        p.save()
+        p.rotate(i * 72.0)
+        path = QPainterPath()
+        path.moveTo(r * 0.16, -r * 0.12)
+        path.cubicTo(r * 0.60, -r * 0.36, r * 0.90, -r * 0.30, r * 1.0, -r * 0.02)
+        path.cubicTo(r * 0.74, r * 0.02, r * 0.44, r * 0.06, r * 0.16, r * 0.10)
+        path.closeSubpath()
+        p.drawPath(path)
+        p.restore()
+    _hub(p, r, c, 0.20)
+
+
+def _rotor_maple(p, r, c, ctx):
+    """Three samara blades - a maple seed, which is the shape nature settled
+    on for the same job and reads instantly at any size."""
+    p.setPen(Qt.NoPen)
+    p.setBrush(QBrush(c))
+    for i in range(3):
+        p.save()
+        p.rotate(i * 120.0)
+        path = QPainterPath()
+        path.moveTo(r * 0.18, 0)
+        path.cubicTo(r * 0.44, -r * 0.46, r * 0.86, -r * 0.50, r * 1.0, -r * 0.16)
+        path.cubicTo(r * 0.86, r * 0.10, r * 0.48, r * 0.16, r * 0.18, r * 0.16)
+        path.closeSubpath()
+        p.drawPath(path)
+        p.restore()
+    _hub(p, r, c, 0.22)
+
+
+def _rotor_helix(p, r, c, ctx):
+    """Twisting ribbons: each blade is a filled band whose two edges cross, so
+    it reads as a surface turning through the plane rather than a flat paddle.
+    Drawn as an outline pair and filled - two separate strokes just merged into
+    a blob at tray size."""
+    p.setPen(Qt.NoPen)
+    p.setBrush(QBrush(c))
+    for i in range(3):
+        p.save()
+        p.rotate(i * 120.0)
+        path = QPainterPath()
+        path.moveTo(r * 0.16, -r * 0.06)
+        path.cubicTo(r * 0.44, -r * 0.46, r * 0.74, r * 0.12, r * 0.99, -r * 0.14)
+        path.lineTo(r * 0.99, r * 0.12)
+        path.cubicTo(r * 0.74, r * 0.38, r * 0.44, -r * 0.20, r * 0.16, r * 0.20)
+        path.closeSubpath()
+        p.drawPath(path)
+        p.restore()
+    _hub(p, r, c, 0.22)
+
+
+def _rotor_starfan(p, r, c, ctx):
+    points = 5
+    p.setPen(Qt.NoPen)
+    p.setBrush(QBrush(c))
+    path = QPainterPath()
+    for i in range(points * 2):
+        ang = math.radians(i * 180.0 / points - 90.0)
+        rad = r if i % 2 == 0 else r * 0.40
+        pt = QPointF(rad * math.cos(ang), rad * math.sin(ang))
+        path.lineTo(pt) if i else path.moveTo(pt)
+    path.closeSubpath()
+    p.drawPath(path)
+
+
+def _rotor_turbofan(p, r, c, ctx):
+    """A wide rim packed with short blades, like a laptop or GPU turbo fan."""
+    p.setBrush(Qt.NoBrush)
+    p.setPen(_pen(c, r * 0.10 * ctx.thickness))
+    p.drawEllipse(QPointF(0, 0), r * 0.97, r * 0.97)
+    _blades(p, r * 0.90, 12, 20, 16, r * 0.46, c)
+    _hub(p, r, c, 0.34)
+
+
+def _rotor_ringfan(p, r, c, ctx):
+    """A shrouded rotor: the blade tips are joined by a ring, which is what
+    the quiet high-pressure fans do to stop the tips shedding vortices."""
+    _blades(p, r * 0.86, 7, 40, 24, r * 0.22, c)
+    p.setBrush(Qt.NoBrush)
+    p.setPen(_pen(c, r * 0.11 * ctx.thickness))
+    p.drawEllipse(QPointF(0, 0), r * 0.93, r * 0.93)
+    _hub(p, r, c, 0.24)
+
+
+def _rotor_ducted(p, r, c, ctx):
+    """A thick duct, three struts holding the motor, and a rotor inside.
+
+    Three struts rather than four, and a gap between them and the blade tips:
+    at 22 px four struts line up with the blades and the whole thing closes
+    into a disc.
+    """
+    p.setBrush(Qt.NoBrush)
+    p.setPen(_pen(c, r * 0.19 * ctx.thickness))
+    p.drawEllipse(QPointF(0, 0), r * 0.90, r * 0.90)
+    p.setPen(_pen(c, r * 0.08 * ctx.thickness))
+    for i in range(3):
+        p.save()
+        p.rotate(i * 120.0 + 30)
+        p.drawLine(QPointF(r * 0.42, 0), QPointF(r * 0.80, 0))
+        p.restore()
+    _blades(p, r * 0.50, 4, 56, 34, r * 0.13, c)
+    _hub(p, r, c, 0.19)
+
+
+def _rotor_squirrel(p, r, c, ctx):
+    """A squirrel cage: many short forward-curved blades round an open middle."""
+    p.setPen(_pen(c, r * 0.09 * ctx.thickness))
+    p.setBrush(Qt.NoBrush)
+    p.drawEllipse(QPointF(0, 0), r * 0.98, r * 0.98)
+    p.drawEllipse(QPointF(0, 0), r * 0.52, r * 0.52)
+    p.setPen(_pen(c, r * 0.10 * ctx.thickness))
+    for i in range(16):
+        p.save()
+        p.rotate(i * 360.0 / 16)
+        path = QPainterPath()
+        path.moveTo(r * 0.54, 0)
+        path.quadTo(r * 0.80, -r * 0.16, r * 0.96, -r * 0.06)
+        p.drawPath(path)
+        p.restore()
+
+
+def _rotor_waterwheel(p, r, c, ctx):
+    """Flat radial blades between two rings - a paddle wheel."""
+    p.setBrush(Qt.NoBrush)
+    p.setPen(_pen(c, r * 0.09 * ctx.thickness))
+    p.drawEllipse(QPointF(0, 0), r * 0.98, r * 0.98)
+    p.drawEllipse(QPointF(0, 0), r * 0.40, r * 0.40)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QBrush(c))
+    for i in range(8):
+        p.save()
+        p.rotate(i * 45.0)
+        p.drawRect(QRectF(r * 0.40, -r * 0.09, r * 0.56, r * 0.18))
+        p.restore()
+    _hub(p, r, c, 0.16)
+
+
 ROTORS = {
     "classic": _rotor_classic, "triblade": _rotor_triblade,
     "pinwheel": _rotor_pinwheel, "propeller": _rotor_propeller,
@@ -529,6 +812,12 @@ ROTORS = {
     "vortex": _rotor_vortex, "ceiling": _rotor_ceiling,
     "windmill": _rotor_windmill, "leaf": _rotor_leaf,
     "snowflake": _rotor_snowflake, "cog": _rotor_cog, "orbit": _rotor_orbit,
+    "paddle": _rotor_paddle, "axial7": _rotor_axial7, "axial9": _rotor_axial9,
+    "slimfan": _rotor_slimfan, "sickle": _rotor_sickle, "scythe": _rotor_scythe,
+    "maple": _rotor_maple, "helix": _rotor_helix, "starfan": _rotor_starfan,
+    "turbofan": _rotor_turbofan, "ringfan": _rotor_ringfan,
+    "ducted": _rotor_ducted, "squirrel": _rotor_squirrel,
+    "waterwheel": _rotor_waterwheel,
 }
 
 
@@ -554,6 +843,152 @@ def _framed(p, style, r, c, ctx, angle):
         p.setBrush(Qt.NoBrush)
         p.drawRoundedRect(QRectF(-r, -r, r * 2, r * 2), r * 0.24, r * 0.24)
         rotor(r * 0.72)
+    elif style == "pwmfan":
+        # a case fan with its 4-pin tail, which is what tells it apart from
+        # every other square thing in a tray
+        pen = _pen(c, w * 0.92)
+        pen.setJoinStyle(Qt.MiterJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(QRectF(-r, -r, r * 1.70, r * 1.70),
+                          r * 0.20, r * 0.20)
+        # the tail: a lead out of the corner into a 4-pin block, which is the
+        # one detail that says "case fan" rather than "square thing"
+        p.setPen(_pen(c, r * 0.10 * ctx.thickness))
+        path = QPainterPath()
+        path.moveTo(r * 0.70, r * 0.40)
+        path.cubicTo(r * 0.96, r * 0.46, r * 0.94, r * 0.74, r * 0.78, r * 0.86)
+        p.drawPath(path)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(c))
+        p.drawRoundedRect(QRectF(r * 0.40, r * 0.78, r * 0.40, r * 0.22),
+                          r * 0.06, r * 0.06)
+        p.save()
+        p.translate(-r * 0.15, -r * 0.15)
+        p.rotate(angle)
+        _blades(p, r * 0.62, 7, 44, 28, r * 0.16, c)
+        _hub(p, r * 0.62, c, 0.22)
+        p.restore()
+    elif style == "caged":
+        # the wire guard: concentric rings and spokes, with the rotor behind it
+        p.save()
+        p.rotate(angle)
+        _blades(p, r * 0.80, 5, 52, 32, r * 0.18, c)
+        _hub(p, r * 0.80, c, 0.20)
+        p.restore()
+        p.setBrush(Qt.NoBrush)
+        p.setPen(_pen(c, r * 0.07 * ctx.thickness))
+        for f in (0.42, 0.70, 0.98):
+            p.drawEllipse(QPointF(0, 0), r * f, r * f)
+        for i in range(6):
+            p.save()
+            p.rotate(i * 60.0)
+            p.drawLine(QPointF(r * 0.20, 0), QPointF(r * 0.98, 0))
+            p.restore()
+    elif style == "deskfan":
+        # cage, rotor, neck and base: a desk fan seen from the front
+        p.save()
+        p.translate(0, -r * 0.18)
+        p.save()
+        p.rotate(angle)
+        _blades(p, r * 0.66, 4, 58, 34, r * 0.14, c)
+        _hub(p, r * 0.66, c, 0.22)
+        p.restore()
+        p.setBrush(Qt.NoBrush)
+        p.setPen(_pen(c, r * 0.07 * ctx.thickness))
+        p.drawEllipse(QPointF(0, 0), r * 0.80, r * 0.80)
+        p.drawEllipse(QPointF(0, 0), r * 0.44, r * 0.44)
+        p.restore()
+        p.setPen(_pen(c, r * 0.11 * ctx.thickness))
+        p.drawLine(QPointF(0, r * 0.62), QPointF(0, r * 0.86))
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(c))
+        p.drawRoundedRect(QRectF(-r * 0.52, r * 0.84, r * 1.04, r * 0.18),
+                          r * 0.09, r * 0.09)
+    elif style == "exhaust":
+        # a wall extractor: square frame, louvre slats across the bottom half
+        pen = _pen(c, w * 0.80)
+        pen.setJoinStyle(Qt.MiterJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(QRectF(-r, -r, r * 2, r * 2), r * 0.12, r * 0.12)
+        p.save()
+        p.rotate(angle)
+        _blades(p, r * 0.62, 6, 46, 28, r * 0.14, c)
+        _hub(p, r * 0.62, c, 0.22)
+        p.restore()
+        p.setPen(_pen(c, r * 0.07 * ctx.thickness))
+        for i in range(3):
+            y = r * 0.42 + i * r * 0.22
+            p.drawLine(QPointF(-r * 0.84, y), QPointF(r * 0.84, y))
+    elif style == "crossflow":
+        # a tangential drum: long, low, and packed with blades along its length
+        pen = _pen(c, r * 0.10 * ctx.thickness)
+        pen.setJoinStyle(Qt.MiterJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(QRectF(-r, -r * 0.52, r * 2, r * 1.04),
+                          r * 0.50, r * 0.50)
+        p.setPen(_pen(c, r * 0.08 * ctx.thickness))
+        for i in range(7):
+            x = -r * 0.78 + i * r * 0.26
+            lean = r * 0.12 * math.sin(math.radians(angle + i * 40.0))
+            p.drawLine(QPointF(x - lean, -r * 0.38), QPointF(x + lean, r * 0.38))
+    elif style == "bladeless":
+        # the ring is the fan; only the airflow inside it moves
+        p.setBrush(Qt.NoBrush)
+        p.setPen(_pen(c, r * 0.20 * ctx.thickness))
+        p.drawEllipse(QRectF(-r * 0.86, -r * 0.98, r * 1.72, r * 1.62))
+        p.setPen(_pen(c, r * 0.07 * ctx.thickness))
+        for i in range(3):
+            t = ((angle / 360.0) + i / 3.0) % 1.0
+            rr = r * (0.20 + 0.42 * t)
+            fade = QColor(c) if isinstance(c, QColor) else QColor("#cccccc")
+            fade.setAlphaF(fade.alphaF() * max(0.0, 1.0 - t))
+            p.setPen(_pen(fade, r * 0.07 * ctx.thickness))
+            p.drawArc(QRectF(-rr, -r * 0.18 - rr * 0.9, rr * 2, rr * 1.8),
+                      200 * 16, 140 * 16)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(c))
+        p.drawRoundedRect(QRectF(-r * 0.26, r * 0.56, r * 0.52, r * 0.30),
+                          r * 0.10, r * 0.10)
+        p.drawRoundedRect(QRectF(-r * 0.52, r * 0.86, r * 1.04, r * 0.16),
+                          r * 0.08, r * 0.08)
+    elif style == "stacked":
+        # two rotors on one axis turning opposite ways, the way a high-pressure
+        # server fan is built
+        p.save()
+        p.rotate(angle)
+        _blades(p, r, 7, 30, 22, r * 0.62, c)
+        p.restore()
+        p.save()
+        p.rotate(-angle)
+        _blades(p, r * 0.56, 5, 48, 30, r * 0.14, c)
+        _hub(p, r * 0.56, c, 0.22)
+        p.restore()
+    elif style == "heatpipe":
+        # fin stack with the heatpipe ends showing through it, and a fan beside
+        pen = _pen(c, r * 0.09 * ctx.thickness)
+        pen.setJoinStyle(Qt.MiterJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(QRectF(r * 0.10, -r * 0.86, r * 0.90, r * 1.72),
+                          r * 0.09, r * 0.09)
+        p.setPen(_pen(c, r * 0.055 * ctx.thickness))
+        for i in range(5):
+            y = -r * 0.64 + i * r * 0.32
+            p.drawLine(QPointF(r * 0.14, y), QPointF(r * 0.96, y))
+        # the heatpipe ends, poking out of the top of the stack
+        p.setPen(_pen(c, r * 0.09 * ctx.thickness))
+        for i in range(3):
+            x = r * 0.28 + i * r * 0.27
+            p.drawLine(QPointF(x, -r * 0.86), QPointF(x, -r * 0.98))
+        p.save()
+        p.translate(-r * 0.46, 0)
+        p.rotate(angle)
+        _blades(p, r * 0.52, 7, 44, 28, r * 0.12, c)
+        _hub(p, r * 0.52, c, 0.24)
+        p.restore()
     elif style == "hexfan":
         pen = _pen(c, r * 0.15 * ctx.thickness)
         pen.setJoinStyle(Qt.MiterJoin)
@@ -860,26 +1295,36 @@ def render_pixmap(size: int, style: str, color, animation: str, phase: float,
         brush = QBrush(grad)
 
     rotor_angle = angle * st.spin + st.rotation
-
-    p.save()
-    p.translate(cx + st.dx * size, cy + st.dy * size)
     fill = max(0.3, min(2.0, ctx.scale))
     if style in EDGE_TO_EDGE_STYLES:
         fill = min(fill, 1.0)
-    p.scale(st.scale * fill, st.scale * fill)
+    squash = float(st.extra.get("squash", 1.0))
 
-    if style == "number":
-        p.restore()
+    def paint(at_angle: float, paint_brush, alpha: float = 1.0) -> None:
         p.save()
-        _draw_number(p, QRectF(pad, pad, size - 2 * pad, size - 2 * pad), base, ctx)
-    elif style in METER_STYLES:
-        _meter(p, style, r, brush if ctx.prism else base, ctx)
-    elif style in FRAMED_STYLES:
-        _framed(p, style, r, brush, ctx, rotor_angle)
-    else:
-        p.rotate(rotor_angle)
-        ROTORS.get(style, _rotor_classic)(p, r, brush, ctx)
-    p.restore()
+        p.translate(cx + st.dx * size, cy + st.dy * size)
+        p.scale(st.scale * fill, st.scale * fill * squash)
+        if alpha < 1.0:
+            p.setOpacity(alpha)
+        if style == "number":
+            p.restore()
+            p.save()
+            p.setOpacity(alpha)
+            _draw_number(p, QRectF(pad, pad, size - 2 * pad, size - 2 * pad),
+                         base, ctx)
+        elif style in METER_STYLES:
+            _meter(p, style, r, paint_brush if ctx.prism else base, ctx)
+        elif style in FRAMED_STYLES:
+            _framed(p, style, r, paint_brush, ctx, at_angle)
+        else:
+            p.rotate(at_angle)
+            ROTORS.get(style, _rotor_classic)(p, r, paint_brush, ctx)
+        p.restore()
+
+    # Ghosts first, furthest back first, so the leading edge sits on top.
+    for offset, ghost_alpha in reversed(st.ghosts):
+        paint(rotor_angle + offset, brush, base.alphaF() * ghost_alpha)
+    paint(rotor_angle, brush)
 
     # airflow: arcs sweeping off the tips, so a still shape still says "moving"
     if st.airflow >= 0.0:
