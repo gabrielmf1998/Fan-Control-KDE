@@ -1,7 +1,7 @@
 %global bin fan-control
 
 Name:           fan-control-kde
-Version:        2.2.0
+Version:        2.3.0
 Release:        1%{?dist}
 Summary:        Tray applet for fan speed, fan curves and temperatures
 
@@ -41,8 +41,9 @@ Calibration sweeps a fan and writes down the duty it actually starts turning at,
 which is the one thing a curve cannot be guessed without.
 
 One icon can speak for the whole machine, or be pinned to a single fan, and
-there can be as many as you have fans worth watching. Headers the board never
-populated can be hidden outright.
+there can be as many as you have fans worth watching - each with an appearance
+of its own, so the CPU icon and the GPU icon are not the same picture twice.
+Headers the board never populated can be hidden outright.
 
 53 icon shapes, 30 of them fan rotors - a three-blade classic, sickle, scythe
 and maple blades, a squirrel cage, a bladeless ring, a counter-rotating pair -
@@ -134,6 +135,18 @@ gtk-update-icon-cache %{_datadir}/icons/hicolor &>/dev/null || :
 %dir %{_sysconfdir}/fan-control-kde
 
 %changelog
+* Sun Sep 06 2026 Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com> - 2.3.0-1
+- Each tray icon can have an appearance of its own: its own shape, colours,
+  animations, badge, size and rotation range. A CPU icon and a GPU icon no
+  longer have to be the same picture in two places
+- Appearance and States are edited for whichever icon is picked at the top of
+  the settings window; an icon either follows the shared look or has a
+  complete one of its own, with nothing in between to guess at
+- An icon's own Appearance menu edits that icon when it has a look of its own,
+  so picking a shape from it no longer changes every other icon too
+- Frame rate stays shared: one timer drives every icon and cannot redraw two of
+  them at two different rates without one tearing
+
 * Sun Sep 06 2026 Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com> - 2.2.0-1
 - Fans can be hidden. A board wires more headers than it populates and the
   empty ones are still real pwm channels the kernel reports at 100%, so they

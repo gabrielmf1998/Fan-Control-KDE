@@ -35,7 +35,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 
 STATE_DIR = "/etc/fan-control-kde"
 STATE = os.path.join(STATE_DIR, "state.json")

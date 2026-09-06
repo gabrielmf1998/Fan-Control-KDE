@@ -27,7 +27,9 @@ from .config import (
     BADGE_SOURCES,
     COLOR_MODES,
     DYNAMIC_COLOR_MODES,
+    ICON_APPEARANCE_KEYS,
     MODE_COLORS,
+    IconView,
     dominant_mode,
     resolve_state,
 )
@@ -130,6 +132,9 @@ class FanIcon(QObject):
         self.manager = manager
         self.cfg = manager.cfg
         self.scope = scope or "all"
+        # Everything this icon draws itself with is read through here, so it
+        # never has to know whether it has an appearance of its own.
+        self.look = IconView(self.cfg, self.scope)
 
         self.state = "error"
         self.mode = "auto"
@@ -192,34 +197,34 @@ class FanIcon(QObject):
         self.mode = dominant_mode([dict(d, mode=snapshot.mode_of(d))
                                    for d in devices])
 
-        animation = self.cfg.animation_for(self.state)
-        dynamic = self.cfg.get("color_mode") in DYNAMIC_COLOR_MODES
+        animation = self.look.animation_for(self.state)
+        dynamic = self.look.get("color_mode") in DYNAMIC_COLOR_MODES
         moving = animation != "none" and (
-            self.factor > 0.0 or self.cfg.get("animate_when_idle", True)
+            self.factor > 0.0 or self.look.get("animate_when_idle", True)
             or animation not in icons.ROTATING)
         self.alive = bool(dynamic or moving)
 
-        source = self.cfg.get("spin_source", "rpm")
+        source = self.look.get("spin_source", "rpm")
         if source == "fixed":
             drive = 1.0
         elif source == "percent":
             drive = snapshot.top_percent_of(self.scope) / 100.0
         else:
             drive = self.factor
-        lo = float(self.cfg.get("spin_min_dps", 36.0))
-        hi = float(self.cfg.get("spin_max_dps", 444.0))
-        speed = float(self.cfg.get("animation_speed", 1.0))
+        lo = float(self.look.get("spin_min_dps", 36.0))
+        hi = float(self.look.get("spin_max_dps", 444.0))
+        speed = float(self.look.get("animation_speed", 1.0))
         if drive > 0:
             self.deg_per_sec = (lo + drive * (hi - lo)) * speed
-        elif animation in icons.ROTATING and self.cfg.get("animate_when_idle", True):
+        elif animation in icons.ROTATING and self.look.get("animate_when_idle", True):
             # Nothing is turning, but the user asked for movement anyway: give
             # it the slow end of the range rather than freezing the icon.
             self.deg_per_sec = lo * speed
         else:
             self.deg_per_sec = 0.0
 
-        self.max_step = (icons.max_step_degrees(self.cfg.get("icon_style", "classic"))
-                         if self.cfg.get("smooth_rotation", True) else 360.0)
+        self.max_step = (icons.max_step_degrees(self.look.get("icon_style", "classic"))
+                         if self.look.get("smooth_rotation", True) else 360.0)
 
         if not self.alive:
             self.angle = 0.0
@@ -229,7 +234,7 @@ class FanIcon(QObject):
     def tick(self, delta: float, snapshot) -> None:
         if not self.alive:
             return
-        self.phase += delta * float(self.cfg.get("animation_speed", 1.0))
+        self.phase += delta * float(self.look.get("animation_speed", 1.0))
         # Whatever the clock says, never turn far enough in one frame to strobe.
         self.angle = (self.angle
                       + min(self.deg_per_sec * delta, self.max_step)) % 360.0
@@ -237,10 +242,10 @@ class FanIcon(QObject):
 
     # ---------------------------------------------------------------- icon
     def _context(self, snapshot) -> icons.RenderCtx:
-        cfg = self.cfg
+        look = self.look
         text = ""
-        if cfg.get("show_badge"):
-            source = cfg.get("badge_source", "percent")
+        if look.get("show_badge"):
+            source = look.get("badge_source", "percent")
             if source == "percent":
                 text = str(snapshot.top_percent_of(self.scope))
             elif source == "rpm":
@@ -256,26 +261,26 @@ class FanIcon(QObject):
             factor=self.factor,
             percent=snapshot.top_percent_of(self.scope),
             temp=snapshot.hottest_of(self.scope),
-            warn=float(cfg.get("warn_temp", 75)),
-            critical=float(cfg.get("critical_temp", 90)),
-            thickness=float(cfg.get("icon_thickness", 1.0)),
-            padding=float(cfg.get("icon_padding", 0.02)),
-            scale=float(cfg.get("icon_scale", 1.0)),
-            badge=bool(cfg.get("show_badge")),
+            warn=float(self.cfg.get("warn_temp", 75)),
+            critical=float(self.cfg.get("critical_temp", 90)),
+            thickness=float(look.get("icon_thickness", 1.0)),
+            padding=float(look.get("icon_padding", 0.02)),
+            scale=float(look.get("icon_scale", 1.0)),
+            badge=bool(look.get("show_badge")),
             badge_text=text,
-            badge_style=cfg.get("badge_style", "circle"),
-            badge_position=cfg.get("badge_position", "br"),
-            badge_color=cfg.get("badge_color", "#0d1117"),
-            badge_text_color=cfg.get("badge_text_color", "#ffffff"),
-            mode_dot=MODE_COLORS.get(self.mode, "") if cfg.get("mode_dot") else "",
-            prism=cfg.get("color_mode") == "prism",
+            badge_style=look.get("badge_style", "circle"),
+            badge_position=look.get("badge_position", "br"),
+            badge_color=look.get("badge_color", "#0d1117"),
+            badge_text_color=look.get("badge_text_color", "#ffffff"),
+            mode_dot=MODE_COLORS.get(self.mode, "") if look.get("mode_dot") else "",
+            prism=look.get("color_mode") == "prism",
             text=text or str(snapshot.top_percent_of(self.scope)),
         )
 
     def _color(self, snapshot) -> str:
-        mode = self.cfg.get("color_mode", "state")
+        mode = self.look.get("color_mode", "state")
         if mode == "mono":
-            return self.cfg.get("mono_color", "#c9d1d9")
+            return self.look.get("mono_color", "#c9d1d9")
         if mode == "theme":
             return QApplication.palette().windowText().color().name()
         if mode == "rainbow":
@@ -283,18 +288,18 @@ class FanIcon(QObject):
         if mode == "spinbow":
             return icons.hue_color(self.angle / 360.0).name()
         if mode == "prism":
-            return self.cfg.color_for(self.state)
+            return self.look.color_for(self.state)
         if mode == "heat":
             hottest = snapshot.hottest_of(self.scope)
             if hottest is None:
-                return self.cfg.color_for(self.state)
+                return self.look.color_for(self.state)
             critical = float(self.cfg.get("critical_temp", 90))
             span = max(1.0, critical - 30.0)
             t = max(0.0, min(1.0, (hottest - 30.0) / span))
             return icons.hue_color(0.55 * (1.0 - t)).name()
         if mode == "velocity":
             return icons.hue_color(0.58 * (1.0 - self.factor)).name()
-        return self.cfg.color_for(self.state)
+        return self.look.color_for(self.state)
 
     def refresh(self, snapshot) -> None:
         """One pixmap, not four.
@@ -304,10 +309,10 @@ class FanIcon(QObject):
         frame for a cell that draws one of them, and the panel answered by
         quietly coalescing frames.
         """
-        size = int(self.cfg.get("icon_size", 48))
+        size = int(self.look.get("icon_size", 48))
         self.tray.setIcon(QIcon(icons.render_pixmap(
-            size, self.cfg.get("icon_style", "classic"), self._color(snapshot),
-            self.cfg.animation_for(self.state), self.phase, self.angle,
+            size, self.look.get("icon_style", "classic"), self._color(snapshot),
+            self.look.animation_for(self.state), self.phase, self.angle,
             self._context(snapshot))))
 
     def update_tooltip(self, snapshot) -> None:
@@ -406,18 +411,27 @@ class FanIcon(QObject):
                 self._disabled(
                     temps, f"{sensor['label']}   {sensor['temp']:.0f} °C{mark}")
 
-        look = menu.addMenu("Appearance")
+        look = menu.addMenu("Appearance" + ("   (this icon only)"
+                                           if self.look.has_own_look else ""))
+        own = QAction("Give this icon a look of its own", look, checkable=True)
+        own.setChecked(self.look.has_own_look)
+        own.setToolTip("Ticked, everything below changes only this icon. "
+                       "Unticked, it follows the shared appearance again.")
+        own.triggered.connect(
+            lambda checked: manager.set_own_look(self, checked))
+        look.addAction(own)
+        look.addSeparator()
         self._quick(look, "Icon", icons.ICON_STYLES,
-                    self.cfg.get("icon_style"), "icon_style")
+                    self.look.get("icon_style"), "icon_style")
         self._quick(look, "Colour", COLOR_MODES,
-                    self.cfg.get("color_mode"), "color_mode")
+                    self.look.get("color_mode"), "color_mode")
         self._quick(look, "Motion", icons.ANIMATIONS,
-                    self.cfg.animation_for(self.state), "_animation_all")
+                    self.look.animation_for(self.state), "_animation_all")
         self._quick(look, "Frame rate",
                     [(str(v), f"{v} fps") for v in (12, 18, 22, 30, 45, 60)],
                     str(self.cfg.get("animation_fps")), "animation_fps")
         self._quick(look, "Badge", [("", "None")] + list(BADGE_SOURCES),
-                    self.cfg.get("badge_source") if self.cfg.get("show_badge")
+                    self.look.get("badge_source") if self.look.get("show_badge")
                     else "", "_badge")
 
         settings_action = QAction("Settings…", menu)
@@ -474,7 +488,7 @@ class FanIcon(QObject):
             action = QAction(item_label, sub, checkable=True)
             action.setChecked(item_key == current)
             action.triggered.connect(
-                lambda _c=False, k=item_key: self.manager.quick_set(key, k))
+                lambda _c=False, k=item_key: self.manager.quick_set(key, k, self))
             group.addAction(action)
             sub.addAction(action)
         self._keep.append(group)
@@ -725,18 +739,50 @@ class FanTray(QObject):
             self.dialog.load_from_config()
         self.notify(APP_NAME, "Hidden. The Fans tab in Settings brings it back.")
 
-    def quick_set(self, key: str, value) -> None:
+    def set_own_look(self, icon: FanIcon, on: bool) -> None:
+        """Give one icon its own appearance, or hand it back to the shared one.
+
+        Seeded from whatever is shared right now, so ticking it changes nothing
+        visible - it only decides where the next change lands.
+        """
+        self.cfg.set_icon_look(icon.scope,
+                               self.cfg.shared_look() if on else None)
+        self.cfg.save()
+        self.apply_settings()
+        if self.dialog is not None:
+            self.dialog.load_from_config()
+
+    def quick_set(self, key: str, value, icon: FanIcon | None = None) -> None:
+        """Applied to the icon that asked, if it has an appearance of its own.
+
+        Picking a shape from an icon's own menu and having every other icon
+        change with it would make per-icon looks useless the moment you touched
+        the menu.
+        """
+        own = icon.look.has_own_look if icon is not None else False
+        look = dict(self.cfg.icon_look(icon.scope)) if own else None
+
+        def put(k, v):
+            if look is not None and k in ICON_APPEARANCE_KEYS:
+                look[k] = v
+            else:
+                self.cfg[k] = v
+
         if key == "_animation_all":
-            self.cfg["animations"] = {state: value
-                                      for state in self.cfg["animations"]}
+            base = (look or {}).get("animations") or self.cfg["animations"]
+            put("animations", {state: value for state in base})
         elif key == "_badge":
-            self.cfg["show_badge"] = bool(value)
+            put("show_badge", bool(value))
             if value:
-                self.cfg["badge_source"] = value
+                put("badge_source", value)
         elif key == "animation_fps":
+            # One timer drives every icon, so the frame rate is always shared.
             self.cfg[key] = int(value)
         else:
-            self.cfg[key] = value
+            put(key, value)
+
+        if look is not None:
+            self.cfg.set_icon_look(icon.scope, look)
         self.cfg.save()
         self.apply_settings()
         if self.dialog is not None:

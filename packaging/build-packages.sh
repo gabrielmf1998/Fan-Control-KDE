@@ -5,7 +5,7 @@ set -euo pipefail
 
 NAME=fan-control-kde
 BIN=fan-control
-VERSION=2.2.0
+VERSION=2.3.0
 RELEASE=1
 MAINT="Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com>"
 URL="https://github.com/gabrielmf1998/Fan-Control-KDE"
@@ -103,8 +103,9 @@ Description: $SUMMARY
  is the one thing a curve cannot be guessed without.
  .
  One icon can speak for the whole machine, or be pinned to a single fan, and
- there can be as many as you have fans worth watching. Headers the board never
- populated can be hidden outright.
+ there can be as many as you have fans worth watching - each with an appearance
+ of its own, so the CPU icon and the GPU icon are not the same picture twice.
+ Headers the board never populated can be hidden outright.
  .
  53 icon shapes - 30 of them fan rotors, from a three-blade classic through
  sickle, scythe and maple blades to a squirrel cage, a bladeless ring and a

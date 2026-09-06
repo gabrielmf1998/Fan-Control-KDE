@@ -34,9 +34,9 @@ release, checks it against the `SHA256SUMS` published beside it, and installs it
 
 | Distribution | File |
 | --- | --- |
-| Fedora, RHEL, Nobara | `fan-control-kde-2.2.0-1.fc*.noarch.rpm` |
-| Debian, Ubuntu, Mint | `fan-control-kde_2.2.0-1_all.deb` |
-| Arch, Manjaro, CachyOS | `fan-control-kde-2.2.0-1-any.pkg.tar.zst` |
+| Fedora, RHEL, Nobara | `fan-control-kde-2.3.0-1.fc*.noarch.rpm` |
+| Debian, Ubuntu, Mint | `fan-control-kde_2.3.0-1_all.deb` |
+| Arch, Manjaro, CachyOS | `fan-control-kde-2.3.0-1-any.pkg.tar.zst` |
 | Anything else | `Fan-Control-KDE-x86_64.AppImage` |
 
 The AppImage needs `python3` and `PySide6` on the system, and it **cannot ship
@@ -269,6 +269,33 @@ fan** for the ones you only find out are junk after you look at them.
 Tick two fans and you get two icons: a CPU one and a GPU one, instead of one
 icon averaging a 100% case fan and a 53% graphics card into a number that
 describes neither.
+
+### Each icon can look different
+
+Two icons that are the same picture in two places are two icons you have to
+read the tooltip of. So the appearance is per icon: **Appearance for** at the
+top of the settings window picks which one the Appearance and States tabs are
+editing, and **This icon has a look of its own** decides whether it follows the
+shared look or keeps its own.
+
+Its own shape, its own colour mode and per-state colours, its own animations,
+its own badge, size, stroke weight, margin and rotation range. Make the CPU
+icon a three-blade classic in heat colours and the GPU icon a graphics-card
+outline in green, and you can tell at a glance which is which without hovering
+anything.
+
+An icon either follows the shared look or has a complete one of its own —
+there is no third state, because a per-control "inherited" tickbox is a lot of
+interface for very little. Ticking the box seeds it from whatever is shared
+right now, so it changes nothing visible; it only decides where the *next*
+change lands. Unticking hands it straight back.
+
+The same toggle is in each icon's own **Appearance** menu in the tray, and
+picking a shape there changes that icon alone once it has a look of its own.
+
+The one thing that stays shared is the **frame rate**: one timer drives every
+icon, and it cannot redraw two of them at two different rates without one of
+them tearing.
 
 ![States](docs/states.png)
 

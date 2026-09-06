@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 from . import __version__, autostart, curves, curveeditor, icons, system, updates
 from .config import (
     APP_NAME,
+    ICON_APPEARANCE_KEYS,
     BADGE_SOURCES,
     COLOR_MODES,
     COLOR_PRESETS,
@@ -395,6 +396,26 @@ class SettingsDialog(QDialog):
         self._pending_package = ""
 
         self.strip = StateStrip(self)
+
+        # Which icon the Appearance and States tabs are editing. Everything
+        # else in this window is shared whatever is picked here.
+        target_row = QHBoxLayout()
+        target_row.addWidget(QLabel("Appearance for"))
+        self.appearance_target = QComboBox()
+        self.appearance_target.setMinimumWidth(260)
+        self.appearance_target.currentIndexChanged.connect(self._target_changed)
+        target_row.addWidget(self.appearance_target)
+        self.own_look = QCheckBox("This icon has a look of its own")
+        self.own_look.setToolTip(
+            "Ticked, the Appearance and States tabs change only this icon. "
+            "It starts as a copy of the shared look, so ticking it changes "
+            "nothing visible — it only decides where the next change lands.")
+        self.own_look.toggled.connect(self._toggle_own_look)
+        target_row.addWidget(self.own_look)
+        self.target_hint = _hint("")
+        target_row.addWidget(self.target_hint, 1)
+        self._target_scope = ""
+
         self.tabs = tabs = QTabWidget(self)
         tabs.addTab(self._build_appearance(), "Appearance")
         tabs.addTab(self._build_states(), "States")
@@ -417,6 +438,7 @@ class SettingsDialog(QDialog):
 
         root = QVBoxLayout(self)
         root.addWidget(self.strip)
+        root.addLayout(target_row)
         root.addWidget(tabs, 1)
         root.addWidget(self.status)
         root.addWidget(buttons)
@@ -435,6 +457,7 @@ class SettingsDialog(QDialog):
         self.downloader.progress.connect(self._on_download_progress)
         self.downloader.finished.connect(self._on_download_done)
 
+        self._refresh_targets()
         self.load_from_config()
         self._on_snapshot(monitor.snapshot)
 
@@ -816,6 +839,7 @@ class SettingsDialog(QDialog):
         self.main_icon.blockSignals(True)
         self.main_icon.setChecked("all" in scopes)
         self.main_icon.blockSignals(False)
+        self._refresh_targets()
 
     def _rebuild_fans(self, snapshot) -> None:
         names = self.cfg.get("device_names") or {}
@@ -1459,36 +1483,114 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, "Update",
                                 err or out or f"The installer exited with {code}.")
 
+    # ============================================ which icon we are editing
+    def _icon_label(self, scope: str) -> str:
+        if scope == "all":
+            return "The whole-machine icon"
+        names = self.cfg.get("device_names") or {}
+        dev = self.monitor.snapshot.device(scope)
+        return names.get(scope, (dev or {}).get("label", scope))
+
+    def _refresh_targets(self) -> None:
+        wanted = self._target_scope
+        self.appearance_target.blockSignals(True)
+        self.appearance_target.clear()
+        self.appearance_target.addItem("Every icon (the shared look)", "")
+        for scope in self.cfg.get("tray_icons") or ["all"]:
+            self.appearance_target.addItem(self._icon_label(scope), scope)
+        index = self.appearance_target.findData(wanted)
+        self.appearance_target.setCurrentIndex(max(0, index))
+        self._target_scope = self.appearance_target.currentData() or ""
+        self.appearance_target.blockSignals(False)
+        self._sync_target_controls()
+
+    def _sync_target_controls(self) -> None:
+        scope = self._target_scope
+        own = bool(scope) and self.cfg.icon_look(scope) is not None
+        self.own_look.blockSignals(True)
+        self.own_look.setEnabled(bool(scope))
+        self.own_look.setChecked(own)
+        self.own_look.blockSignals(False)
+        if not scope:
+            self.target_hint.setText(
+                "Changes here apply to every icon that has not been given a "
+                "look of its own.")
+        elif own:
+            self.target_hint.setText("Changes here apply to this icon alone.")
+        else:
+            self.target_hint.setText(
+                "This icon follows the shared look. Tick the box to give it "
+                "one of its own.")
+
+    def _look(self):
+        """The settings object the Appearance and States tabs are editing."""
+        scope = self._target_scope
+        if scope and self.cfg.icon_look(scope) is not None:
+            return self.cfg.view(scope)
+        return self.cfg
+
+    def _store_appearance(self, scope: str) -> None:
+        """Write what the controls currently say into wherever it belongs."""
+        values = {k: v for k, v in self._collect().items()
+                  if k in ICON_APPEARANCE_KEYS}
+        if scope and self.cfg.icon_look(scope) is not None:
+            self.cfg.set_icon_look(scope, values)
+        else:
+            self.cfg.update(values)
+
+    def _target_changed(self) -> None:
+        # Save what is on screen against the icon it was being edited for,
+        # before the controls are reloaded for a different one.
+        self._store_appearance(self._target_scope)
+        self._target_scope = self.appearance_target.currentData() or ""
+        self._sync_target_controls()
+        self.load_from_config()
+        self.cfg.save()
+        self.applied.emit()
+
+    def _toggle_own_look(self, on: bool) -> None:
+        scope = self._target_scope
+        if not scope:
+            return
+        self.cfg.set_icon_look(scope, self.cfg.shared_look() if on else None)
+        self.cfg.save()
+        self._sync_target_controls()
+        self.load_from_config()
+        self.applied.emit()
+
     # ================================================== load and save
     def load_from_config(self) -> None:
         cfg = self.cfg
-        self.style_gallery.set_current(cfg["icon_style"])
-        _set_data(self.icon_size, int(cfg["icon_size"]))
-        self.scale.setValue(float(cfg["icon_scale"]))
-        self.thickness.setValue(float(cfg["icon_thickness"]))
-        self.padding.setValue(float(cfg["icon_padding"]))
+        # Appearance comes from whichever icon is being edited; everything else
+        # is the machine's, not any one icon's.
+        look = self._look()
+        self.style_gallery.set_current(look["icon_style"])
+        _set_data(self.icon_size, int(look["icon_size"]))
+        self.scale.setValue(float(look["icon_scale"]))
+        self.thickness.setValue(float(look["icon_thickness"]))
+        self.padding.setValue(float(look["icon_padding"]))
         self.fps.setValue(int(cfg["animation_fps"]))
-        self.anim_speed.setValue(float(cfg["animation_speed"]))
-        _set_data(self.spin_source, cfg["spin_source"])
-        self.spin_min.setValue(float(cfg["spin_min_dps"]))
-        self.spin_max.setValue(float(cfg["spin_max_dps"]))
-        self.animate_idle.setChecked(bool(cfg["animate_when_idle"]))
-        self.smooth_rotation.setChecked(bool(cfg["smooth_rotation"]))
-        _set_data(self.color_mode, cfg["color_mode"])
-        self.mono_color.set_color(cfg["mono_color"])
-        self.mode_dot.setChecked(bool(cfg["mode_dot"]))
+        self.anim_speed.setValue(float(look["animation_speed"]))
+        _set_data(self.spin_source, look["spin_source"])
+        self.spin_min.setValue(float(look["spin_min_dps"]))
+        self.spin_max.setValue(float(look["spin_max_dps"]))
+        self.animate_idle.setChecked(bool(look["animate_when_idle"]))
+        self.smooth_rotation.setChecked(bool(look["smooth_rotation"]))
+        _set_data(self.color_mode, look["color_mode"])
+        self.mono_color.set_color(look["mono_color"])
+        self.mode_dot.setChecked(bool(look["mode_dot"]))
 
-        self.show_badge.setChecked(bool(cfg["show_badge"]))
-        _set_data(self.badge_source, cfg["badge_source"])
-        _set_data(self.badge_style, cfg["badge_style"])
-        _set_data(self.badge_position, cfg["badge_position"])
-        self.badge_color.set_color(cfg["badge_color"])
-        self.badge_text_color.set_color(cfg["badge_text_color"])
+        self.show_badge.setChecked(bool(look["show_badge"]))
+        _set_data(self.badge_source, look["badge_source"])
+        _set_data(self.badge_style, look["badge_style"])
+        _set_data(self.badge_position, look["badge_position"])
+        self.badge_color.set_color(look["badge_color"])
+        self.badge_text_color.set_color(look["badge_text_color"])
 
         for key, button in self._color_buttons.items():
-            button.set_color(cfg.color_for(key))
+            button.set_color(look.color_for(key))
         for key, combo in self._anim_combos.items():
-            _set_data(combo, cfg.animation_for(key))
+            _set_data(combo, look.animation_for(key))
         self.warn_temp.setValue(int(cfg["warn_temp"]))
         self.critical_temp.setValue(int(cfg["critical_temp"]))
 
@@ -1568,6 +1670,15 @@ class SettingsDialog(QDialog):
                 "The critical temperature has to be above the warning one.")
             return False
         autostart.set_enabled(values["start_with_system"])
+        scope = self._target_scope
+        if scope and self.cfg.icon_look(scope) is not None:
+            # Editing one icon: its appearance goes to it, and everything else
+            # in this window is still the machine's.
+            self.cfg.set_icon_look(
+                scope, {k: v for k, v in values.items()
+                        if k in ICON_APPEARANCE_KEYS})
+            values = {k: v for k, v in values.items()
+                      if k not in ICON_APPEARANCE_KEYS}
         self.cfg.update(values)
         self.cfg.save()
         self.monitor.retime()
@@ -1595,14 +1706,25 @@ class SettingsDialog(QDialog):
             self, "Back to the defaults?",
             "Every appearance and behaviour setting goes back to how it "
             "shipped. Fan speeds and curves are not touched, and neither are "
-            "the fans you have hidden or the names you gave them.",
+            "the fans you have hidden or the names you gave them.\n\n"
+            "If one icon is being edited above, only that icon is put back on "
+            "the shared look.",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if answer != QMessageBox.Yes:
             return
-        keep = {key: self.cfg.get(key)
-                for key in ("device_hidden", "device_names", "tray_icons")}
-        self.cfg.reset()
-        self.cfg.update(keep)
+        scope = self._target_scope
+        if scope and self.cfg.icon_look(scope) is not None:
+            # Only this icon is being edited, so only this icon goes back -
+            # to the shared look, which is what it had before it was given one.
+            self.cfg.set_icon_look(scope, None)
+        else:
+            keep = {key: self.cfg.get(key)
+                    for key in ("device_hidden", "device_names", "tray_icons",
+                                "icon_overrides")}
+            self.cfg.reset()
+            self.cfg.update(keep)
+        self.cfg.save()
+        self._sync_target_controls()
         self.load_from_config()
         self.applied.emit()
 

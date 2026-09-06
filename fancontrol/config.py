@@ -207,6 +207,11 @@ DEFAULTS: dict = {
     # one entry means more than one icon - a CPU icon and a GPU icon, say,
     # instead of one icon arguing with itself about which of them to show.
     "tray_icons": ["all"],
+    # Appearance kept per icon, keyed by the same scope string. An icon either
+    # has its own complete look in here or it has no entry and follows the
+    # shared one - partial overrides would mean every control needing a third
+    # state for "inherited", which is a lot of interface for very little.
+    "icon_overrides": {},
 
     # ------------------------------------------------ notifications
     "notifications_enabled": True,
@@ -223,6 +228,60 @@ DEFAULTS: dict = {
     "check_updates_on_start": False,
     "update_channel": "both",        # github | gitlab | both
 }
+
+
+# What an icon may keep its own copy of.
+#
+# The frame rate is deliberately not on this list: one timer drives every icon,
+# and it cannot redraw two of them at two different rates without one tearing.
+# Warning and critical temperatures are not here either - how hot the machine is
+# allowed to get is a fact about the machine, not a decoration.
+ICON_APPEARANCE_KEYS = (
+    "icon_style", "color_mode", "colors", "mono_color", "animations",
+    "animation_speed", "animate_when_idle", "icon_size", "icon_scale",
+    "icon_thickness", "icon_padding", "mode_dot",
+    "spin_source", "spin_min_dps", "spin_max_dps", "smooth_rotation",
+    "show_badge", "badge_source", "badge_style", "badge_position",
+    "badge_color", "badge_text_color",
+)
+
+
+class IconView:
+    """What one tray icon sees.
+
+    Its own appearance if it has one, the shared appearance if it does not, and
+    the shared settings for everything that is not appearance at all. Reads go
+    through here so an icon never has to know which of the two it is using.
+    """
+
+    def __init__(self, cfg, scope: str) -> None:
+        self.cfg = cfg
+        self.scope = scope or "all"
+
+    @property
+    def own(self) -> dict | None:
+        return (self.cfg.get("icon_overrides") or {}).get(self.scope)
+
+    @property
+    def has_own_look(self) -> bool:
+        return self.own is not None
+
+    def get(self, key: str, default=None):
+        own = self.own
+        if own is not None and key in ICON_APPEARANCE_KEYS and key in own:
+            return own[key]
+        return self.cfg.get(key, default)
+
+    def __getitem__(self, key: str):
+        return self.get(key)
+
+    def color_for(self, state: str) -> str:
+        colors = self.get("colors") or {}
+        return colors.get(state) or DEFAULT_COLORS.get(state, "#c9d1d9")
+
+    def animation_for(self, state: str) -> str:
+        anims = self.get("animations") or {}
+        return anims.get(state) or DEFAULT_ANIMATIONS.get(state, "none")
 
 
 def _merge(base: dict, incoming: dict) -> dict:
@@ -267,6 +326,26 @@ class Config:
     def animation_for(self, state: str) -> str:
         anims = self._data.get("animations") or {}
         return anims.get(state) or DEFAULT_ANIMATIONS.get(state, "none")
+
+    # -- per-icon appearance ------------------------------------------------
+    def view(self, scope: str) -> IconView:
+        return IconView(self, scope)
+
+    def icon_look(self, scope: str) -> dict | None:
+        return (self._data.get("icon_overrides") or {}).get(scope)
+
+    def set_icon_look(self, scope: str, look: dict | None) -> None:
+        """None drops the override, putting that icon back on the shared look."""
+        overrides = dict(self._data.get("icon_overrides") or {})
+        if look is None:
+            overrides.pop(scope, None)
+        else:
+            overrides[scope] = {k: copy.deepcopy(v) for k, v in look.items()
+                                if k in ICON_APPEARANCE_KEYS}
+        self._data["icon_overrides"] = overrides
+
+    def shared_look(self) -> dict:
+        return {key: copy.deepcopy(self.get(key)) for key in ICON_APPEARANCE_KEYS}
 
     # -- persistence -------------------------------------------------------
     def load(self) -> None:
