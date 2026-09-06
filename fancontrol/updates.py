@@ -28,8 +28,10 @@ from . import __version__, system
 from .config import APP_NAME, GITHUB_REPO, GITLAB_REPO, GITLAB_URL, PROJECT_URL
 
 GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+# permalink/latest rather than the whole list: the list is every release ever
+# made, and picking assets out of it means picking them out of all of them.
 GITLAB_API = (f"https://gitlab.com/api/v4/projects/{quote(GITLAB_REPO, safe='')}"
-              "/releases")
+              "/releases/permalink/latest")
 RELEASES_PAGE = f"{PROJECT_URL}/releases/latest"
 GITLAB_RELEASES_PAGE = f"{GITLAB_URL}/-/releases"
 

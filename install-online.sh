@@ -11,7 +11,7 @@ set -eu
 REPO="gabrielmf1998/Fan-Control-KDE"
 GITLAB="gabriel17166%2Ffan-control-kde"
 API="https://api.github.com/repos/$REPO/releases/latest"
-GITLAB_API="https://gitlab.com/api/v4/projects/$GITLAB/releases"
+GITLAB_API="https://gitlab.com/api/v4/projects/$GITLAB/releases/permalink/latest"
 
 info() { printf '\033[1m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[1;33m==>\033[0m %s\n' "$*" >&2; }
@@ -60,8 +60,12 @@ assets_github() {
 }
 
 assets_gitlab() {
+    # Only the attached packages. Scraping every URL out of the JSON also
+    # collects the ones written in the release notes, the source archives and
+    # the packager's avatar, and then "the first thing ending in .rpm" is
+    # whatever those happened to mention.
     curl -fsSL "$GITLAB_API" 2>/dev/null | tr ',' '\n' \
-        | grep -o 'https://[^"]*' | grep -v '/api/v4/'
+        | grep '"direct_asset_url"' | cut -d'"' -f4
 }
 
 ASSETS="$(assets_github || true)"
