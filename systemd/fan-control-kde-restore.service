@@ -1,0 +1,23 @@
+[Unit]
+Description=Re-apply the fan speeds saved by Fan Control KDE
+Documentation=https://github.com/gabrielmf1998/fan-control-kde
+# NVIDIA cards are driven through nvidia-settings, which needs the user's X or
+# XWayland session; that appears a little after boot, hence the wait and the
+# retry. Motherboard headers are set long before it and do not care.
+After=multi-user.target
+Wants=graphical.target
+ConditionPathExists=/etc/fan-control-kde/state.json
+# A curve owns the fans it is running; putting a saved flat speed on top of one
+# would just be undone a second later.
+Conflicts=fan-control-kde-curve.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/bin/sleep 20
+ExecStart=/usr/libexec/fan-control-helper restore
+Restart=on-failure
+RestartSec=20
+
+[Install]
+WantedBy=graphical.target

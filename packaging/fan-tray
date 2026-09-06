@@ -1,0 +1,4 @@
+#!/bin/sh
+# Compatibility launcher. Fan Control KDE 1.x installed itself as `fan-tray`,
+# and an autostart entry or a shortcut written back then still points here.
+exec /usr/bin/fan-control "$@"

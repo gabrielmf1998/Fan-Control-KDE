@@ -1,0 +1,28 @@
+[Unit]
+Description=Fan Control KDE curve daemon
+Documentation=https://github.com/gabrielmf1998/fan-control-kde
+After=multi-user.target
+ConditionPathExists=/etc/fan-control-kde/curves.json
+# Only one of these may own the fans at a time.
+Conflicts=fan-control-kde-restore.service
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/fan-control-helper daemon
+Restart=on-failure
+RestartSec=10
+# The daemon hands every fan it touched back to the firmware on the way out, so
+# it needs long enough to do that before it is killed.
+TimeoutStopSec=20
+KillSignal=SIGTERM
+Nice=-5
+# It reads hwmon and writes pwm, and nothing else on the machine is its
+# business.
+ProtectHome=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

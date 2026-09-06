@@ -1,156 +1,318 @@
 # Fan Control KDE
 
-A system tray applet for KDE Plasma that sets **CPU/case fan** and **NVIDIA GPU
-fan** speed. Tray icon only — no windows, no dialogs. The icon is a fan that
-spins at a rate proportional to the *measured* RPM, and stops only when the
-fans have actually stopped.
+Every fan the machine will admit to having, in the system tray. Set a speed by
+hand, hand a fan back to its firmware, or draw a fan curve on a graph and have a
+small system service run it.
 
-![icons](docs/icons.png)
+![Icon styles](docs/icon-styles.png)
 
-_The nine icon styles, each drawn at runtime._
+The icon is painted every frame rather than loaded from a file, which is what
+lets it spin at a rate taken from the **measured rpm**, take a colour from the
+hottest sensor, and follow the panel's own foreground in light and dark themes.
 
-## What it does
-
-- Sets motherboard fan headers (through the kernel `hwmon` interface) and AMD or
-  NVIDIA GPU fans.
-- Shows live RPM and temperature for every controller, refreshed every 4 s.
-- Optionally restores your chosen speeds on every boot.
-- Checks GitHub and GitLab for a newer release, so you never have to go looking.
-
-## Appearance
-
-Everything is painted at runtime, which is what lets the icon spin at a rate
-taken from the *measured* RPM — it stops only when the fans have actually
-stopped, and turns slowly when they idle at their mechanical minimum.
-
-**15 icon styles** — Classic, Turbine, Pinwheel, Case fan, Blower, Ceiling,
-Impeller, Hex frame, Spiral, Tri-blade, Jet turbine, Cog, Snowflake, Vortex,
-Orbit.
-
-![icons](docs/icons.png)
-
-**11 colour modes** — three of them react to the machine:
-
-| | |
-|---|---|
-| **Follow theme** | monochrome, tracks the panel foreground in light and dark |
-| **Rainbow** | hue cycles continuously |
-| **Rainbow spin** | hue follows the rotation, so the colour turns with the blades |
-| **Prism** | a conical gradient gives every blade its own hue |
-| **Heat** | cyan at 30 °C through red at 90 °C, driven by the hottest device |
-| **Velocity** | blue when idle through red at full speed |
-| Neon pink, Cyan, Lime, Amber, Violet | fixed |
-
-![colours](docs/colours.png)
-
-**7 motions** — Spin, Reverse spin, Pulse, Spin + pulse, Wobble, Tumble, Static.
-Each still reflects how fast the fans are actually running.
-
-**5 frame rates** — 12 to 45 fps. Rotation is defined in degrees per *second*,
-so the visual speed is identical at every rate; only the smoothness changes.
-At 30 fps with the Prism gradient rendering live on every frame, the applet
-costs about 1 % of one core.
-
-## Supported hardware
-
-Everything is discovered at startup by probing sysfs — nothing is hardcoded for
-a particular board or card. A controller that cannot be driven is still listed,
-with the reason, instead of being hidden.
-
-| | Control | Notes |
-|---|---|---|
-| **Motherboard fan headers** | yes | any chip exposing `pwmN` under `/sys/class/hwmon` — `nct6775` family, `it87`, `f71882fg` and friends |
-| **AMD RX 400/500** (Polaris) | yes | classic `amdgpu` hwmon `pwm1` |
-| **AMD RX 5000/6000** (RDNA/RDNA2) | yes | same interface |
-| **AMD RX 7000** (RDNA3) | usually | some boards' firmware refuses manual PWM; the write fails and the app says so instead of pretending |
-| **NVIDIA** (proprietary driver) | yes | through `nvidia-settings`; needs an X or XWayland session |
-| **Intel Arc** (`i915`) | read only | the driver exposes `fan1_input` but no PWM |
-| **Intel Arc** (`xe`) | read only | PWM control is not in mainline yet |
-| **Integrated GPUs** | n/a | no fan of their own; skipped automatically |
-
-## Requirements
-
-| | |
-|---|---|
-| Desktop | KDE Plasma (X11 or Wayland) — needs a StatusNotifierItem tray |
-| Python | 3.9+ |
-| Qt bindings | **PySide6** |
-| Privileges | **polkit** (`pkexec`) |
-| Init | **systemd**, only for the "keep after reboot" option |
-| Optional | `lspci` for readable GPU names, `nvidia-settings` for NVIDIA |
-
-If `sensors` shows no fans, the Super I/O driver is probably not loaded — try
-`sudo modprobe nct6775` (or run `sudo sensors-detect`).
-
-### Fedora
-```
-sudo dnf install python3-pyside6 polkit lm_sensors pciutils
-```
-### Arch
-```
-sudo pacman -S pyside6 polkit lm_sensors pciutils
-```
+---
 
 ## Install
 
-Download a package from [Releases](../../releases), or:
+One line, on Fedora, Debian, Ubuntu, Arch and their derivatives:
 
-```bash
+```sh
+curl -fsSL https://raw.githubusercontent.com/gabrielmf1998/fan-control-kde/main/install-online.sh | sh
+```
+
+or from the mirror:
+
+```sh
+curl -fsSL https://gitlab.com/gabriel17166/fan-control-kde/-/raw/main/install-online.sh | sh
+```
+
+It works out which package your distribution wants, takes it from the latest
+release, checks it against the `SHA256SUMS` published beside it, and installs it.
+
+<details>
+<summary>Or take a package from the release page</summary>
+
+| Distribution | File |
+| --- | --- |
+| Fedora, RHEL, Nobara | `fan-control-kde-2.0.0-1.fc*.noarch.rpm` |
+| Debian, Ubuntu, Mint | `fan-control-kde_2.0.0-1_all.deb` |
+| Arch, Manjaro, CachyOS | `fan-control-kde-2.0.0-1-any.pkg.tar.zst` |
+| Anything else | `Fan-Control-KDE-x86_64.AppImage` |
+
+The AppImage needs `python3` and `PySide6` on the system, and it **cannot ship
+the privileged helper** — `pkexec` will only run a real file on disk that a
+polkit policy names by path. Without a packaged install it can neither read nor
+change anything, because every fan control on Linux needs root.
+
+</details>
+
+<details>
+<summary>Or from a clone</summary>
+
+```sh
 git clone https://github.com/gabrielmf1998/fan-control-kde
 cd fan-control-kde
-sudo make install
+./install.sh
 ```
 
-Then start `fan-tray`, or log out and back in — the desktop entry autostarts it.
+`./install.sh uninstall` takes it back out. Your settings and curves stay.
 
-## Hardware quirks worth knowing
+</details>
 
-These are not bugs in this program; they are how the hardware behaves.
+Once it is running: **Settings → Updates → Check for updates** finds a newer
+release on either forge, shows what changed, and installs it on a click.
 
-**The NVIDIA API only accepts 30–100 %.** `GPUTargetFanSpeed` refuses anything
-lower — and `nvidia-settings` still exits 0 when it refuses, so a naive tool
-reports success while the fan never moves. The helper clamps to the driver's
-own advertised range and then **reads the speed back** to report what really
-happened. Many cards still stop their fans entirely at the low end via their
-own zero-RPM mode, so 0 % is often a real outcome.
+---
 
-**AMD RX 7000 may refuse manual control.** The kernel exposes `pwm1_enable`
-on every `amdgpu` card, but on some RDNA3 boards the firmware rejects the
-write. The app reports the errno it got rather than claiming success. Those
-cards still accept a fan curve through `gpu_od/fan_ctrl/fan_curve`, which this
-version does not drive yet.
+## What it can drive
 
-**Motherboard fans may not stop at 0 %.** Most 4-pin fans have a mechanical
-minimum and keep turning at ~500 rpm even at 0 % duty. If your board exposes
-DC mode (`pwmN_mode = 0`) the fan can be stopped by cutting voltage, but many
-boards are PWM-only and reject the switch.
+Fan control is not one interface, it is four, and which one a machine has
+decides what is possible on it. This is what each one actually gives you.
 
-**NVIDIA exposes no `hwmon`.** There is no `pwm` file in `/sys` for the GPU;
-`nvidia-settings`/NVML is the only route, which is why an X or XWayland session
-is required even on Wayland.
+### Motherboard headers — the CPU fan and the case fans
 
-## How it is put together
+Through the kernel's own `hwmon` PWM interface, so **any chip with a driver
+works**: the whole nct6775 family (nct6106 through nct6799), it87, f71882fg,
+w83627, `dell_smm` on Dell laptops, `thinkpad_acpi`, `applesmc`, the ASUS WMI
+and EC sensor drivers.
+
+Every header is its own fan here, listed and controlled one at a time — not one
+ganged "CPU / case" device. Header 1 is guessed to be the CPU fan and the rest
+chassis headers, and you can rename any of them to whatever is actually plugged
+in.
+
+> **AMD or Intel makes no difference to this.** The CPU fan header is on the
+> motherboard, driven by the board's Super I/O chip; the CPU is not involved in
+> its own fan at all. A Ryzen machine and a Core machine are the same problem.
+> What differs is the *temperature* you point a curve at: `k10temp` (Tctl/Tccd)
+> on AMD, `coretemp` (Package id 0) on Intel. Both are listed.
+
+If nothing turns up, the Super I/O driver is not loaded. `sudo sensors-detect`
+finds it; a few boards also need `acpi_enforce_resources=lax` on the kernel
+command line, because ACPI claims the chip and the driver politely stands down.
+
+### AMD Radeon
+
+| Cards | How | What you get |
+| --- | --- | --- |
+| RX 400, RX 500 (Polaris), Vega, RX 5000 (RDNA1), RX 6000 (RDNA2) | `amdgpu` hwmon `pwm1` | Flat manual duty, auto, full range |
+| RX 7000 (RDNA3), RX 9000 (RDNA4) | overdrive fan curve, `gpu_od/fan_ctrl/` | A **firmware fan curve**, zero-rpm, acoustic limits |
+
+RDNA3 and RDNA4 are the important row. Those cards' firmware very often
+**refuses flat manual PWM** — the write lands, the driver returns success, and
+the fan does not move. What they do have is a real fan curve in the firmware, and
+this writes to it. Draw the curve, press *Write it into the firmware*, and the
+card runs it with nothing loaded at all.
+
+That interface needs OverDrive turned on, which is a kernel parameter:
 
 ```
-fan-tray            tray applet (PySide6), runs as you
-fan-tray-helper     runs as root through polkit; only touches fan controls
+amdgpu.ppfeaturemask=0xffffffff
 ```
 
-The helper is bound to a single polkit action. `data/49-fan-control-kde.rules`
-lets members of `wheel` change fan speed without a password — delete it if you
-would rather be asked (you then get one prompt per session).
+Zero-rpm control (`fan_zero_rpm_enable`, `fan_zero_rpm_stop_temperature`) is
+RDNA3-and-newer on Linux 6.13 or later.
 
-A tray menu is exported over **DBusMenu** and drawn by the panel, not by Qt.
-That protocol carries labels, checkmarks, separators and submenus and nothing
-else, which is why speed is a list of levels rather than a slider: an embedded
-widget has no representation in it and renders as an empty box.
+### NVIDIA
 
-## Uninstall
+GeForce, Quadro and RTX cards, through `nvidia-settings`. It needs two things
+that have nothing to do with this program:
 
-```bash
-sudo make uninstall
+* **`Coolbits` in the X configuration.** `sudo nvidia-xconfig --cool-bits=28`,
+  or an `Option "Coolbits" "28"` line in the `OutputClass` section of
+  `/usr/share/X11/xorg.conf.d/10-nvidia.conf`. Without it the driver refuses
+  every fan write — and exits 0 while doing so, which is why this reads the
+  speed back afterwards and tells you what the driver actually kept.
+* **An X or XWayland display.** `nvidia-settings` has no Wayland-native path
+  yet. On a Plasma Wayland session it works through XWayland, which is what the
+  helper points it at.
+
+Most GeForce cards clamp their minimum to about 30%; the range the driver
+reports is read out of it, and the menu will not offer anything below it. NVIDIA
+exposes no firmware fan curve to Linux, so a curve on an NVIDIA card is run by
+the background service.
+
+`nvidia-smi` is used for the readings — speed, temperature and utilisation — and
+cannot set anything.
+
+### Intel
+
+Discrete Arc cards report fan speed through the `i915`/`xe` hwmon
+(`fan1_input`), and that is all mainline has: the PWM control patches for `xe`
+are not merged. Those cards are listed as monitor-only, with that as the stated
+reason rather than being hidden. If a kernel with the control patches is running,
+the PWM channel appears and the generic hwmon backend drives it with no changes
+here.
+
+Intel integrated graphics have no fan; the fan cooling an Intel CPU is on a
+motherboard header, covered above.
+
+---
+
+## Fan curves
+
+![The curve editor](docs/curve-editor.png)
+
+Drag the points. Click the empty graph to add one, right-click a point to remove
+it, hold <kbd>Shift</kbd> while dragging to change only the duty.
+
+The dashed green line is the sensor this curve follows, *right now*. The filled
+dot is what the curve asks for at that temperature; the hollow ring is what the
+fan is actually doing. Watching those two while a game loads tells you more about
+whether a curve is right than any amount of arithmetic.
+
+Nine starting points — Silent, Quiet, Balanced, Performance, Aggressive, Linear,
+Stepped, Zero RPM, Full blast — and every one of them is just a curve, so you can
+grab a preset and then move it.
+
+**How it responds**, all of it per fan:
+
+| | |
+| --- | --- |
+| **Hysteresis** | How far the temperature has to fall before the fan eases off. This is what stops a fan hunting up and down at a steady load. |
+| **Ramp up / ramp down** | Percentage points per second, separately in each direction. Slow on the way down is what makes a curve sound calm. |
+| **Never below / never above** | A floor and a ceiling, drawn on the graph where they will bite. |
+| **Stop the fan below** | Zero-rpm: below this temperature the fan stops entirely. |
+| **Kick to start at** | A stopped fan will not take a low duty from standing. This gives it a shove for a moment first. |
+
+### Calibration — what the fan actually does
+
+Guessing the bottom of a curve is the one thing you cannot do from a datasheet,
+because it is not the fan's specification, it is *this* fan on *this* header.
+
+*Calibrate* sweeps it from 0% to 100% in steps, waits for it to settle at each
+one, and writes down the rpm. Out of that comes the number that matters: **the
+duty this fan actually starts turning at**. A curve that dips below it does not
+run the fan quietly — it stops it.
+
+Take the measurement, pick a style, and it builds a curve that respects it.
+
+### Where a curve runs
+
+**In a system service.** `fan-control-kde-curve.service` applies curves whether
+or not anyone is logged in, and hands every fan it touched back to the firmware
+when it stops — a curve daemon that dies must not leave a fan at 20% while the
+CPU cooks. Above 95 °C every curve is overridden and the fan goes to 100%; a fan
+curve is a comfort setting and that part is not negotiable. If a curve's
+temperature source stops answering, that fan goes to 70% rather than to silence.
+
+**Or in the firmware**, where the hardware has one:
+
+* nct6775-family Super I/O chips have Smart Fan IV — five anchor points and a
+  temperature source. The curve is resampled to those five, the top one pinned
+  at full speed, and written in.
+* RDNA3 and RDNA4 Radeons have the overdrive fan curve described above.
+
+A firmware curve runs with nothing loaded: before login, while the machine is
+booting, and in any other operating system on it. *Undo that* hands the fan back.
+
+---
+
+## The rest of it
+
+![States](docs/states.png)
+
+**31 icon shapes** — fans, propellers, turbines, a radiator, a tower cooler, an
+AIO pump, a CPU, a graphics card, and meters that show a reading instead of
+turning: a dial, a ring, bars, a thermometer, a plain number.
+
+![Animations](docs/animations.png)
+
+**29 animations** — including a few that only make sense here: *Rev* surges and
+settles the way a fan ramps under load, *Gusts* buffets it, *Stutter* strobes it,
+*Airflow* sweeps arcs off the blade tips, and *Glow with the heat* brightens with
+the hottest sensor.
+
+**Nine states**, each with its own colour and its own animation, resolved top to
+bottom so a machine that is too hot says so even while its fans sit at 40%:
+no controller, critically hot, running hot, stopped, idle, low, medium, high,
+full. Eight colour presets, or set every one by hand.
+
+Everything else that was asked for and is now there: icon **size** (22 to 96 px),
+fill of the tray cell, stroke weight, inner margin, **frame rate** (5–60 fps),
+animation speed, the rotation range in degrees per second and whether rotation
+follows measured rpm, requested duty or nothing; a **number badge** on the icon
+showing duty, rpm, temperature or how many fans are turning, in four shapes and
+any corner; a **corner pip** for who is driving the fans; **start with the
+system**; per-fan **renaming**; notifications for heat, for a fan that stalls,
+and for what a curve is doing; and the temperature sensors listed with the
+unpopulated ones marked.
+
+> Super I/O chips wire more thermistor inputs than any board populates, and the
+> empty ones do not read as absent — they read as 15 °C, or 102 °C, or 0. Those
+> are marked, and are never what turns the icon red. They stay selectable for a
+> curve, because on some boards one of them really is the VRM.
+
+---
+
+## How it works, and what it asks for
+
+Reading is unprivileged and constant. Everything that writes goes through a
+helper under `pkexec`, and there are **two** polkit actions, on purpose:
+
+`io.github.gabrielmf1998.fancontrol` — fans, curves, the two services. The
+shipped `49-fan-control-kde.rules` lets members of `wheel` through without a
+prompt, because the tray changes fan speeds constantly and a fan speed is worth
+nothing to an attacker who already has your session. Delete that file to be
+asked once per session instead.
+
+`io.github.gabrielmf1998.fancontrol.install` — installing an update. A separate
+action on a separate binary, deliberately **not** in the rules file, and set to
+ask every single time. Adding it there would turn *change a fan speed without a
+password* into *install anything without a password*. The installer refuses any
+package the system's own tools do not say is called `fan-control-kde`, and the
+download is checked against the release's `SHA256SUMS` before it gets that far.
+
+| Path | What is in it |
+| --- | --- |
+| `~/.config/fan-control-kde/config.json` | Appearance and behaviour |
+| `/etc/fan-control-kde/curves.json` | The curves |
+| `/etc/fan-control-kde/state.json` | Speeds to put back after a reboot |
+| `/run/fan-control-kde/status.json` | What the curve daemon is doing right now |
+
+The helper is a plain command-line program and is worth knowing about:
+
+```sh
+/usr/libexec/fan-control-helper status      # everything, as JSON
+/usr/libexec/fan-control-helper sensors     # every temperature it can see
+sudo /usr/libexec/fan-control-helper set hwmon:nct6799:pwm2 60
+sudo /usr/libexec/fan-control-helper calibrate hwmon:nct6799:pwm2
+sudo /usr/libexec/fan-control-helper hwcurve hwmon:nct6799:pwm1
 ```
 
-## Licence
+---
 
-MIT
+## When it does not work
+
+**No fan controller found.** The Super I/O driver is not loaded — run
+`sudo sensors-detect`, and if the chip is detected but the driver still refuses
+it, add `acpi_enforce_resources=lax` to the kernel command line.
+
+**A speed is accepted and nothing moves.** The write is read back, so this is
+reported rather than assumed. On an RDNA3 or RDNA4 Radeon it means the firmware
+wants its fan curve instead — draw one and write it in. On NVIDIA it means
+`Coolbits` is not set.
+
+**A fan reads 0 rpm at every duty.** Either nothing is plugged into that header,
+or the fan has no sense wire. It can still be driven; it just cannot be measured,
+so calibration has nothing to report and the icon takes its rotation from the
+duty instead.
+
+**The icon is not moving.** *Keep animating while the fans are stopped* is off
+and the fans are stopped, which is the icon telling you the truth.
+
+---
+
+## Building the packages
+
+```sh
+make check          # syntax
+make icons          # regenerate the icon and the documentation sheets
+make packages       # dist/: .rpm, .deb, .pkg.tar.zst, .AppImage, SHA256SUMS
+```
+
+---
+
+MIT. Not affiliated with AMD, NVIDIA, Intel or KDE.
+
+Mirrored at [gitlab.com/gabriel17166/fan-control-kde](https://gitlab.com/gabriel17166/fan-control-kde).

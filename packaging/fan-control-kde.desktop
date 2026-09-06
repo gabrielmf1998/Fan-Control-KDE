@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Fan Control
+GenericName=Fan speed and curves
+Comment=Fan speed, fan curves and temperatures in the system tray
+Comment[pt_BR]=Velocidade das ventoinhas, curvas e temperaturas na bandeja do sistema
+Exec=fan-control
+Icon=fan-control-kde
+Terminal=false
+Categories=System;Monitor;Settings;
+Keywords=fan;cooling;pwm;rpm;temperature;curve;hwmon;gpu;cpu;
+Keywords[pt_BR]=ventoinha;cooler;refrigeracao;temperatura;curva;
+StartupNotify=false
+X-KDE-autostart-phase=2

@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""System launcher for Fan Control KDE (packaged installs)."""
+import sys
+
+sys.path.insert(0, "/usr/share/fan-control-kde")
+
+from fancontrol.main import main
+
+sys.exit(main())

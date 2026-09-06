@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""Installs a downloaded Fan Control KDE package.
+
+This is deliberately a second binary with a second polkit action. Handing a
+package to dnf as root is not the same kind of thing as setting a fan speed,
+and it must not inherit the rule that lets the fan action through without a
+password: this one always asks, on every machine, however the fan action is
+configured.
+
+It will only install a package that the system's own package tools say is
+called fan-control-kde. The checksum was already verified by the caller against
+the SHA256SUMS published with the release; this is the second half of that -
+the file may be a valid package and still not be ours.
+
+    fan-control-installer <path to .rpm, .deb or .pkg.tar.zst>
+"""
+import os
+import subprocess
+import sys
+
+PACKAGE = "fan-control-kde"
+SUFFIXES = (".rpm", ".deb", ".pkg.tar.zst", ".pkg.tar.xz")
+
+
+def fail(message):
+    print(message, file=sys.stderr)
+    return 1
+
+
+def run(args, timeout=600):
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return type("R", (), {"returncode": 127, "stdout": "",
+                              "stderr": str(exc)})()
+
+
+def package_name(path):
+    """What the package tools say this file is called, or "" if they will not say."""
+    if path.endswith(".rpm"):
+        res = run(["rpm", "-qp", "--queryformat", "%{NAME}", path], timeout=60)
+        return res.stdout.strip() if res.returncode == 0 else ""
+    if path.endswith(".deb"):
+        res = run(["dpkg-deb", "--field", path, "Package"], timeout=60)
+        return res.stdout.strip() if res.returncode == 0 else ""
+    # Arch packages carry .PKGINFO inside; bsdtar can read one member out.
+    res = run(["bsdtar", "-xOf", path, ".PKGINFO"], timeout=60)
+    if res.returncode != 0:
+        res = run(["tar", "-xOf", path, ".PKGINFO"], timeout=60)
+    for line in res.stdout.splitlines():
+        if line.startswith("pkgname"):
+            return line.split("=", 1)[1].strip()
+    return ""
+
+
+def install(path):
+    if path.endswith(".rpm"):
+        for manager in (["dnf", "install", "-y", path],
+                        ["rpm", "-Uvh", "--force", path]):
+            if run(["which", manager[0]], timeout=10).returncode == 0:
+                return run(manager)
+        return None
+    if path.endswith(".deb"):
+        res = run(["apt-get", "install", "-y", "--allow-downgrades", path])
+        if res.returncode != 0:
+            run(["dpkg", "-i", path])
+            res = run(["apt-get", "-f", "install", "-y"])
+        return res
+    return run(["pacman", "-U", "--noconfirm", path])
+
+
+def main():
+    if os.geteuid() != 0:
+        return fail("this has to run as root; it is meant to be started by pkexec")
+    if len(sys.argv) != 2:
+        return fail(__doc__.strip())
+
+    path = os.path.realpath(sys.argv[1])
+    if not os.path.isfile(path):
+        return fail("no such file: %s" % path)
+    if not path.endswith(SUFFIXES):
+        return fail("that is not a package this installs: %s"
+                    % os.path.basename(path))
+
+    name = package_name(path)
+    if not name:
+        return fail("could not read the package's name, so it will not be "
+                    "installed")
+    if name != PACKAGE:
+        return fail("that package is called %r, not %r; refusing to install it"
+                    % (name, PACKAGE))
+
+    result = install(path)
+    if result is None:
+        return fail("no package manager here knows how to install that file")
+    out = (result.stdout or "").strip()
+    err = (result.stderr or "").strip()
+    if result.returncode != 0:
+        return fail(err or out or "the package manager exited with %d"
+                    % result.returncode)
+    print(out.splitlines()[-1] if out else "installed")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

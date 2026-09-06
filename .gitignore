@@ -1,6 +1,4 @@
 __pycache__/
 *.pyc
-*.rpm
-*.pkg.tar.zst
 build/
 dist/
