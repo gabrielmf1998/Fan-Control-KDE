@@ -215,8 +215,11 @@ class FanRow(QGroupBox):
     apply_speed = Signal(str, str)      # device id, value
     calibrate = Signal(str)
     rename = Signal(str, str)
+    visibility = Signal(str, bool)      # device id, shown
+    own_icon = Signal(str, bool)        # device id, has its own tray icon
 
-    def __init__(self, dev: dict, name: str, parent=None) -> None:
+    def __init__(self, dev: dict, name: str, shown: bool, has_icon: bool,
+                 parent=None) -> None:
         super().__init__(parent)
         self.dev_id = dev["id"]
         self.controllable = bool(dev.get("control"))
@@ -224,6 +227,17 @@ class FanRow(QGroupBox):
 
         lay = QVBoxLayout(self)
         head = QHBoxLayout()
+        self.shown = QCheckBox()
+        self.shown.setChecked(shown)
+        self.shown.setToolTip(
+            "Show this fan at all. A board wires more headers than it "
+            "populates, and an empty one is still a real pwm channel the "
+            "kernel will happily report at 100%. Unticking leaves it out of "
+            "the menu, the tooltip and the icon's state - it is not forgotten.")
+        self.shown.toggled.connect(
+            lambda on: self.visibility.emit(self.dev_id, on))
+        head.addWidget(self.shown)
+
         self.name_edit = QLineEdit(name)
         self.name_edit.setMaximumWidth(220)
         self.name_edit.setToolTip("What this fan is called in the menu and here.")
@@ -233,8 +247,17 @@ class FanRow(QGroupBox):
         self.detail = QLabel(dev.get("detail", ""))
         self.detail.setStyleSheet("color: palette(mid);")
         head.addWidget(self.detail, 1)
+        self.own = QCheckBox("Own tray icon")
+        self.own.setChecked(has_icon)
+        self.own.setToolTip(
+            "Give this fan a tray icon of its own, showing only it. Tick two "
+            "and you get two icons - a CPU one and a GPU one, say, instead of "
+            "one icon arguing with itself about which of them to show.")
+        self.own.toggled.connect(lambda on: self.own_icon.emit(self.dev_id, on))
+        head.addWidget(self.own)
         self.reading = QLabel("—")
         self.reading.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.reading.setMinimumWidth(300)
         head.addWidget(self.reading)
         lay.addLayout(head)
 
@@ -305,6 +328,21 @@ class FanRow(QGroupBox):
         self._debounce.stop()
         value = self.spin.value() if self.spin.hasFocus() else self.slider.value()
         self.apply_speed.emit(self.dev_id, str(value))
+
+    def set_shown(self, shown: bool) -> None:
+        self.shown.blockSignals(True)
+        self.shown.setChecked(shown)
+        self.shown.blockSignals(False)
+        for widget in (self.name_edit, self.reading, self.detail):
+            widget.setEnabled(shown)
+        if self.slider is not None:
+            for widget in (self.slider, self.spin):
+                widget.setEnabled(shown)
+
+    def set_own_icon(self, on: bool) -> None:
+        self.own.blockSignals(True)
+        self.own.setChecked(on)
+        self.own.blockSignals(False)
 
     def update_reading(self, dev: dict, mode: str, runtime: dict) -> None:
         bits = []
@@ -657,32 +695,157 @@ class SettingsDialog(QDialog):
             "Every fan the machine will admit to having, one row each. A "
             "motherboard header is its own fan here — ganging them all together "
             "is exactly the control worth having back."))
+
+        tools = QHBoxLayout()
+        self.main_icon = QCheckBox("One icon for the whole machine")
+        self.main_icon.setToolTip(
+            "An icon that speaks for every fan at once. Untick it and tick "
+            "individual fans instead to get one icon each.")
+        self.main_icon.toggled.connect(self._toggle_main_icon)
+        tools.addWidget(self.main_icon)
+        tools.addStretch(1)
+
+        tidy = QPushButton("Hide the ones with no fan detected")
+        tidy.setToolTip(
+            "Unticks every header that reports no rpm at all. Careful: a fan "
+            "with no sense wire spins perfectly well and still reads zero, so "
+            "check the list afterwards.")
+        tidy.clicked.connect(self._hide_untachometered)
+        tools.addWidget(tidy)
+        showall = QPushButton("Show all")
+        showall.clicked.connect(self._show_all_fans)
+        tools.addWidget(showall)
+        self._fans_layout.addLayout(tools)
+
         self._fans_empty = _hint("Looking for fan controllers…")
         self._fans_layout.addWidget(self._fans_empty)
         self._fans_layout.addStretch(1)
         return _scroll(page)
 
+    # ---- hiding, and which fans get an icon of their own ----------------
+    def _hidden(self) -> list[str]:
+        return list(self.cfg.get("device_hidden") or [])
+
+    def _tray_icons(self) -> list[str]:
+        return list(self.cfg.get("tray_icons") or ["all"])
+
+    def _set_visibility(self, dev_id: str, shown: bool) -> None:
+        hidden = self._hidden()
+        if shown and dev_id in hidden:
+            hidden.remove(dev_id)
+        elif not shown and dev_id not in hidden:
+            hidden.append(dev_id)
+        else:
+            return
+        self.cfg["device_hidden"] = hidden
+        # A fan nobody can see should not still own a tray icon.
+        if not shown:
+            self._set_own_icon(dev_id, False, save=False)
+        self.cfg.save()
+        self.monitor.snapshot.hidden = set(hidden)
+        self._sync_fan_rows()
+        self.applied.emit()
+
+    def _set_own_icon(self, dev_id: str, on: bool, save: bool = True) -> None:
+        scopes = self._tray_icons()
+        if on and dev_id not in scopes:
+            scopes.append(dev_id)
+        elif not on and dev_id in scopes:
+            scopes.remove(dev_id)
+        else:
+            return
+        # Never end up with nothing in the tray at all.
+        if not scopes:
+            scopes = ["all"]
+        self.cfg["tray_icons"] = scopes
+        if save:
+            self.cfg.save()
+            self._sync_fan_rows()
+            self.applied.emit()
+
+    def _toggle_main_icon(self, on: bool) -> None:
+        scopes = self._tray_icons()
+        if on and "all" not in scopes:
+            scopes.insert(0, "all")
+        elif not on and "all" in scopes:
+            scopes.remove("all")
+        else:
+            return
+        if not scopes:
+            self._say("Something has to be in the tray — keeping the "
+                      "whole-machine icon.")
+            scopes = ["all"]
+        self.cfg["tray_icons"] = scopes
+        self.cfg.save()
+        self._sync_fan_rows()
+        self.applied.emit()
+
+    def _hide_untachometered(self) -> None:
+        snapshot = self.monitor.snapshot
+        quiet = [d["id"] for d in snapshot.all_devices
+                 if not [r for r in (d.get("rpms") or []) if r]]
+        if not quiet:
+            self._say("Every fan here reports an rpm; nothing to hide.")
+            return
+        hidden = self._hidden()
+        for dev_id in quiet:
+            if dev_id not in hidden:
+                hidden.append(dev_id)
+        scopes = [s for s in self._tray_icons() if s not in hidden] or ["all"]
+        self.cfg["device_hidden"] = hidden
+        self.cfg["tray_icons"] = scopes
+        self.cfg.save()
+        self.monitor.snapshot.hidden = set(hidden)
+        self._sync_fan_rows()
+        self.applied.emit()
+        self._say(f"Hid {len(quiet)} header(s) reporting no rpm.")
+
+    def _show_all_fans(self) -> None:
+        self.cfg["device_hidden"] = []
+        self.cfg.save()
+        self.monitor.snapshot.hidden = set()
+        self._sync_fan_rows()
+        self.applied.emit()
+
+    def _sync_fan_rows(self) -> None:
+        hidden = set(self._hidden())
+        scopes = self._tray_icons()
+        for dev_id, row in self._fan_rows.items():
+            row.set_shown(dev_id not in hidden)
+            row.set_own_icon(dev_id in scopes)
+        self.main_icon.blockSignals(True)
+        self.main_icon.setChecked("all" in scopes)
+        self.main_icon.blockSignals(False)
+
     def _rebuild_fans(self, snapshot) -> None:
         names = self.cfg.get("device_names") or {}
+        hidden = set(self._hidden())
+        scopes = self._tray_icons()
         for row in self._fan_rows.values():
             row.setParent(None)
             row.deleteLater()
         self._fan_rows = {}
-        self._fans_empty.setVisible(not snapshot.devices)
-        if not snapshot.devices:
+        self._fans_empty.setVisible(not snapshot.all_devices)
+        if not snapshot.all_devices:
             self._fans_empty.setText(
                 "No fan controller found. On a desktop this usually means the "
                 "Super I/O driver is not loaded — try <tt>sudo sensors-detect</tt>, "
                 "or add <tt>acpi_enforce_resources=lax</tt> to the kernel command "
                 "line if the chip is there but the driver refuses it.")
             return
-        for dev in snapshot.devices:
-            row = FanRow(dev, names.get(dev["id"], dev["label"]))
+        # Every device, hidden ones included: this tab is the only place a
+        # hidden fan can be brought back, so it must still be listed here.
+        for dev in snapshot.all_devices:
+            row = FanRow(dev, names.get(dev["id"], dev["label"]),
+                         dev["id"] not in hidden, dev["id"] in scopes)
             row.apply_speed.connect(self._set_speed)
             row.calibrate.connect(self._calibrate)
             row.rename.connect(self._rename_device)
+            row.visibility.connect(self._set_visibility)
+            row.own_icon.connect(self._set_own_icon)
             self._fan_rows[dev["id"]] = row
             self._fans_layout.insertWidget(self._fans_layout.count() - 1, row)
+        self._sync_fan_rows()
 
     def _rename_device(self, dev_id: str, name: str) -> None:
         names = dict(self.cfg.get("device_names") or {})
@@ -1348,6 +1511,7 @@ class SettingsDialog(QDialog):
         self.poll_ms.setValue(int(cfg["poll_ms"]))
         self.check_on_start.setChecked(bool(cfg["check_updates_on_start"]))
         _set_data(self.update_channel, cfg["update_channel"])
+        self._sync_fan_rows()
         self._sync_previews()
 
     def _collect(self) -> dict:
@@ -1430,11 +1594,15 @@ class SettingsDialog(QDialog):
         answer = QMessageBox.question(
             self, "Back to the defaults?",
             "Every appearance and behaviour setting goes back to how it "
-            "shipped. Fan speeds and curves are not touched.",
+            "shipped. Fan speeds and curves are not touched, and neither are "
+            "the fans you have hidden or the names you gave them.",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if answer != QMessageBox.Yes:
             return
+        keep = {key: self.cfg.get(key)
+                for key in ("device_hidden", "device_names", "tray_icons")}
         self.cfg.reset()
+        self.cfg.update(keep)
         self.load_from_config()
         self.applied.emit()
 
@@ -1539,7 +1707,7 @@ class SettingsDialog(QDialog):
             # stored one over the top of it would throw that away.
             self._rebuild_curve_lists(snapshot, keep_editor=self._curve_dirty)
 
-        for dev in snapshot.devices:
+        for dev in snapshot.all_devices:
             row = self._fan_rows.get(dev["id"])
             if row:
                 row.update_reading(dev, snapshot.mode_of(dev),

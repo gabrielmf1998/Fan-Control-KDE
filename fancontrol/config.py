@@ -196,6 +196,17 @@ DEFAULTS: dict = {
     # one person who knows which header the top exhaust is plugged into gets to
     # say so.
     "device_names": {},
+    # Headers the machine has but you do not: a board wires six and populates
+    # three, and the empty ones are still perfectly real pwm channels that the
+    # kernel will happily report at 100%. Hidden ones are left out of the menu,
+    # the tooltip, the icon's state and the curve list - but not deleted, so
+    # they can be brought back from the Fans tab.
+    "device_hidden": [],
+    # One entry per tray icon: "all" for an icon that speaks for the whole
+    # machine, or a device id for one that speaks only for that fan. More than
+    # one entry means more than one icon - a CPU icon and a GPU icon, say,
+    # instead of one icon arguing with itself about which of them to show.
+    "tray_icons": ["all"],
 
     # ------------------------------------------------ notifications
     "notifications_enabled": True,

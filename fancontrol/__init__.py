@@ -1,3 +1,3 @@
 """Fan Control KDE - a tray front end for every fan the machine will let us drive."""
 
-__version__ = "2.1.1"
+__version__ = "2.2.0"

@@ -1,4 +1,14 @@
-"""The tray icon itself: menu, tooltip, animation loop and notifications."""
+"""The tray icons: menu, tooltip, animation loop and notifications.
+
+There can be more than one. An icon is either pinned to a single fan or set to
+"all", and a machine with a CPU header and a graphics card is usually clearer as
+two icons than as one icon arguing with itself about which of them to show.
+
+Everything shared - the privileged helper, the update check, the settings
+window, the animation clock and the notifications - lives once, in FanTray. An
+icon owns only what is genuinely its own: where it points, what angle its rotor
+is at, and what it last said.
+"""
 
 from __future__ import annotations
 
@@ -104,39 +114,35 @@ class SpeedMenu:
                 lambda _c=False, v=value: tray.set_speed(self.dev_id, str(v)))
             self.menu.addAction(action)
 
+        self.menu.addSeparator()
+        hide = QAction("Hide this fan", self.menu)
+        hide.setToolTip("Leave it out of the menu, the tooltip and the icon. "
+                        "The Fans tab brings it back.")
+        hide.triggered.connect(lambda: tray.hide_device(self.dev_id))
+        self.menu.addAction(hide)
 
-class FanTray(QObject):
-    def __init__(self, cfg, monitor, parent=None) -> None:
+
+class FanIcon(QObject):
+    """One tray icon, pointed either at everything or at a single fan."""
+
+    def __init__(self, manager, scope: str, parent=None) -> None:
         super().__init__(parent)
-        self.cfg = cfg
-        self.monitor = monitor
-        self.priv = system.Privileged(self)
-        self.updates = updates.UpdateChecker(self)
-        self.dialog: settings_ui.SettingsDialog | None = None
+        self.manager = manager
+        self.cfg = manager.cfg
+        self.scope = scope or "all"
 
         self.state = "error"
         self.mode = "auto"
         self.phase = 0.0
         self.angle = 0.0
         self.factor = 0.0
-        # Motion is driven by the clock, not by the tick count. A tick-based
-        # animation runs slow whenever a frame is late and stalls whenever one
-        # is dropped, and the panel drops plenty: the icon crosses D-Bus on
-        # every frame and plasmashell decodes it on the other side.
         self.deg_per_sec = 0.0
         self.max_step = 360.0
-        self._clock = QElapsedTimer()
-        self._clock.start()
-        self._last_frame = 0
+        self.alive = False
         self._ceilings: dict[str, float] = {}
-        self._spinning = False
-        self._last_state = ""
-        self._last_spinning: dict[str, bool] = {}
-        self._last_curve: dict[str, int] = {}
-        self._tray_timer: QTimer | None = None
-        self._tray_waited = 0
+        self._keep: list = []
 
-        self.tray = QSystemTrayIcon(parent)
+        self.tray = QSystemTrayIcon(self)
         self.tray.setIcon(icons.app_icon())
         self.tray.setToolTip(APP_NAME)
         self.tray.activated.connect(self._activated)
@@ -144,76 +150,60 @@ class FanTray(QObject):
         self.menu = QMenu()
         self.menu.aboutToShow.connect(self.rebuild_menu)
         self.tray.setContextMenu(self.menu)
-
-        self.anim = QTimer(self)
-        # Qt coarsens any interval of 20 ms or more by default and lets the
-        # kernel coalesce it with other timers, which is exactly the irregular
-        # stutter an animation must not have.
-        self.anim.setTimerType(Qt.PreciseTimer)
-        self.anim.timeout.connect(self._tick)
-
-        monitor.changed.connect(self._on_snapshot)
-        self.priv.result.connect(self._on_priv)
-        self.updates.checked.connect(self._on_update_check)
-
         self.rebuild_menu()
-        self.apply_settings()
 
     # ------------------------------------------------------------- lifetime
     def show(self) -> None:
         self.tray.show()
 
-    def wait_for_tray(self) -> None:
-        """Keep trying until somewhere to put the icon turns up.
+    def dispose(self) -> None:
+        self.tray.hide()
+        self.menu.clear()
+        self.tray.setContextMenu(None)
+        self.deleteLater()
 
-        Qt answers isSystemTrayAvailable() from whatever is on the session bus
-        at that instant, and an app started from autostart routinely wins the
-        race against the panel registering its watcher. Refusing to run is the
-        wrong answer; wait for it.
-        """
-        self._tray_waited = 0
-        QApplication.instance().setQuitOnLastWindowClosed(True)
-        self._tray_timer = QTimer(self)
-        self._tray_timer.timeout.connect(self._poll_for_tray)
-        self._tray_timer.start(1000)
-
-    def _poll_for_tray(self) -> None:
-        if QSystemTrayIcon.isSystemTrayAvailable():
-            self._tray_timer.stop()
-            QApplication.instance().setQuitOnLastWindowClosed(False)
-            self.tray.show()
-            self.monitor.poll()
-            return
-        self._tray_waited += 1
-        if self._tray_waited == 25:
-            QMessageBox.warning(
-                None, APP_NAME,
-                "There is no system tray on this desktop yet, so the icon has "
-                "nowhere to go. It will appear on its own if a panel turns up.")
-
-    # ------------------------------------------------------------ settings
-    def apply_settings(self) -> None:
-        self.monitor.retime()
-        self._restart_animation()
-        self._refresh_icon()
-
+    # ---------------------------------------------------------------- scope
     @property
-    def interval_ms(self) -> int:
-        return int(round(1000.0 / max(5, int(self.cfg.get("animation_fps", 22)))))
+    def pinned(self) -> bool:
+        return self.scope != "all"
 
-    def _restart_animation(self) -> None:
+    def devices(self, snapshot) -> list[dict]:
+        return snapshot.scope(self.scope)
+
+    def title(self, snapshot) -> str:
+        if not self.pinned:
+            return APP_NAME
+        dev = snapshot.device(self.scope)
+        if not dev:
+            return f"{APP_NAME} — that fan is gone"
+        names = self.cfg.get("device_names") or {}
+        return names.get(dev["id"], dev["label"])
+
+    # ------------------------------------------------------------ animation
+    def resync(self, snapshot) -> None:
+        """Recompute what this icon shows and how fast its rotor should turn."""
+        warn = float(self.cfg.get("warn_temp", 75))
+        critical = float(self.cfg.get("critical_temp", 90))
+        devices = self.devices(snapshot)
+        hottest = snapshot.hottest_of(self.scope)
+
+        self.factor = snapshot.spin_factor(self._ceilings, self.scope)
+        self.state = resolve_state(devices, hottest, warn, critical)
+        self.mode = dominant_mode([dict(d, mode=snapshot.mode_of(d))
+                                   for d in devices])
+
         animation = self.cfg.animation_for(self.state)
         dynamic = self.cfg.get("color_mode") in DYNAMIC_COLOR_MODES
         moving = animation != "none" and (
             self.factor > 0.0 or self.cfg.get("animate_when_idle", True)
             or animation not in icons.ROTATING)
-        alive = bool(dynamic or moving)
+        self.alive = bool(dynamic or moving)
 
         source = self.cfg.get("spin_source", "rpm")
         if source == "fixed":
             drive = 1.0
         elif source == "percent":
-            drive = self.monitor.snapshot.top_percent / 100.0
+            drive = snapshot.top_percent_of(self.scope) / 100.0
         else:
             drive = self.factor
         lo = float(self.cfg.get("spin_min_dps", 36.0))
@@ -231,35 +221,19 @@ class FanTray(QObject):
         self.max_step = (icons.max_step_degrees(self.cfg.get("icon_style", "classic"))
                          if self.cfg.get("smooth_rotation", True) else 360.0)
 
-        if alive:
-            # Only ever started when it is not already running. Calling start()
-            # on a live QTimer throws away the pending timeout, and this runs on
-            # every poll - which cost exactly one dropped frame every 2.5
-            # seconds, forever.
-            if not self._spinning:
-                self._last_frame = self._clock.elapsed()
-                self.anim.start(self.interval_ms)
-                self._spinning = True
-            elif self.anim.interval() != self.interval_ms:
-                self.anim.setInterval(self.interval_ms)
-        elif self._spinning:
-            self.anim.stop()
-            self._spinning = False
+        if not self.alive:
             self.angle = 0.0
-            self._refresh_icon()
+        self.update_tooltip(snapshot)
+        self.refresh(snapshot)
 
-    def _tick(self) -> None:
-        now = self._clock.elapsed()
-        # Capped: after a suspend, or a session frozen behind a modal password
-        # prompt, the gap is enormous, and neither the phase nor the angle
-        # should leap across it.
-        delta = min(max(now - self._last_frame, 0), 250) / 1000.0
-        self._last_frame = now
+    def tick(self, delta: float, snapshot) -> None:
+        if not self.alive:
+            return
         self.phase += delta * float(self.cfg.get("animation_speed", 1.0))
         # Whatever the clock says, never turn far enough in one frame to strobe.
         self.angle = (self.angle
                       + min(self.deg_per_sec * delta, self.max_step)) % 360.0
-        self._refresh_icon()
+        self.refresh(snapshot)
 
     # ---------------------------------------------------------------- icon
     def _context(self, snapshot) -> icons.RenderCtx:
@@ -268,20 +242,20 @@ class FanTray(QObject):
         if cfg.get("show_badge"):
             source = cfg.get("badge_source", "percent")
             if source == "percent":
-                text = str(snapshot.top_percent)
+                text = str(snapshot.top_percent_of(self.scope))
             elif source == "rpm":
-                rpms = snapshot.rpms
+                rpms = snapshot.rpms_of(self.scope)
                 top = max(rpms) if rpms else 0
                 text = f"{top // 1000}k" if top >= 10000 else str(top)
             elif source == "temp":
-                hottest = snapshot.hottest
+                hottest = snapshot.hottest_of(self.scope)
                 text = f"{hottest:.0f}" if hottest is not None else "—"
             else:
-                text = str(len(snapshot.rpms))
+                text = str(len(snapshot.rpms_of(self.scope)))
         return icons.RenderCtx(
             factor=self.factor,
-            percent=snapshot.top_percent,
-            temp=snapshot.hottest,
+            percent=snapshot.top_percent_of(self.scope),
+            temp=snapshot.hottest_of(self.scope),
             warn=float(cfg.get("warn_temp", 75)),
             critical=float(cfg.get("critical_temp", 90)),
             thickness=float(cfg.get("icon_thickness", 1.0)),
@@ -295,7 +269,7 @@ class FanTray(QObject):
             badge_text_color=cfg.get("badge_text_color", "#ffffff"),
             mode_dot=MODE_COLORS.get(self.mode, "") if cfg.get("mode_dot") else "",
             prism=cfg.get("color_mode") == "prism",
-            text=text or str(snapshot.top_percent),
+            text=text or str(snapshot.top_percent_of(self.scope)),
         )
 
     def _color(self, snapshot) -> str:
@@ -311,7 +285,7 @@ class FanTray(QObject):
         if mode == "prism":
             return self.cfg.color_for(self.state)
         if mode == "heat":
-            hottest = snapshot.hottest
+            hottest = snapshot.hottest_of(self.scope)
             if hottest is None:
                 return self.cfg.color_for(self.state)
             critical = float(self.cfg.get("critical_temp", 90))
@@ -322,70 +296,362 @@ class FanTray(QObject):
             return icons.hue_color(0.58 * (1.0 - self.factor)).name()
         return self.cfg.color_for(self.state)
 
-    def _refresh_icon(self) -> None:
+    def refresh(self, snapshot) -> None:
         """One pixmap, not four.
 
         Every frame of this crosses D-Bus and is decoded by the panel on the
         other side. Handing it a whole QIcon of sizes meant four images per
         frame for a cell that draws one of them, and the panel answered by
-        quietly coalescing frames - which is what an animation resetting
-        actually looks like from the outside.
+        quietly coalescing frames.
         """
-        snapshot = self.monitor.snapshot
         size = int(self.cfg.get("icon_size", 48))
         self.tray.setIcon(QIcon(icons.render_pixmap(
             size, self.cfg.get("icon_style", "classic"), self._color(snapshot),
             self.cfg.animation_for(self.state), self.phase, self.angle,
             self._context(snapshot))))
 
-    # ------------------------------------------------------------- polling
-    def _on_snapshot(self, snapshot) -> None:
-        warn = float(self.cfg.get("warn_temp", 75))
-        critical = float(self.cfg.get("critical_temp", 90))
-        self.factor = snapshot.spin_factor(self._ceilings)
-        state = resolve_state(snapshot.devices, snapshot.hottest, warn, critical)
-        mode = dominant_mode([
-            dict(d, mode=snapshot.mode_of(d)) for d in snapshot.devices])
-
-        changed = state != self.state or mode != self.mode
-        self.state, self.mode = state, mode
-        self._notify_changes(snapshot, state)
-        self._update_tooltip(snapshot)
-        self._restart_animation()
-        if changed or not self._spinning:
-            self._refresh_icon()
-
-    def _update_tooltip(self, snapshot) -> None:
+    def update_tooltip(self, snapshot) -> None:
         if not snapshot.ok:
             self.tray.setToolTip(f"{APP_NAME} — the helper is not answering")
             return
-        if not snapshot.devices:
-            self.tray.setToolTip(f"{APP_NAME} — no fan controller found")
-            return
         names = self.cfg.get("device_names") or {}
-        lines = [APP_NAME]
-        for dev in snapshot.devices:
-            lines.append(fmt_device(dev, names.get(dev["id"], dev["label"]),
-                                    snapshot.mode_of(dev), True))
+        devices = self.devices(snapshot)
+        if not devices:
+            self.tray.setToolTip(
+                f"{APP_NAME} — that fan is no longer there" if self.pinned
+                else f"{APP_NAME} — no fan controller found")
+            return
+
+        lines = [self.title(snapshot)]
+        for dev in devices:
+            line = fmt_device(dev, names.get(dev["id"], dev["label"]),
+                              snapshot.mode_of(dev), True)
+            # A pinned icon's title is already the fan's name; repeating it on
+            # the line under it is the sort of noise this whole feature exists
+            # to get rid of.
+            if self.pinned:
+                line = line.split("   ", 1)[-1] if "   " in line else line
+            lines.append(line)
         if self.cfg.get("tooltip_details", True):
             hottest = snapshot.hottest
-            if hottest is not None:
+            if hottest is not None and not self.pinned:
                 lines.append(f"hottest sensor   {hottest:.0f} °C")
         self.tray.setToolTip("\n".join(lines))
 
-    def _notify_changes(self, snapshot, state: str) -> None:
-        if not self.cfg.get("notifications_enabled", True):
-            self._last_state = state
+    # ---------------------------------------------------------------- menu
+    def rebuild_menu(self) -> None:
+        """Rebuilt every time it is about to be shown.
+
+        Cheap, and it sidesteps the DBusMenu tick that never gets cleared: every
+        action is new, so nothing stale can accumulate in the panel's copy.
+        """
+        manager = self.manager
+        snapshot = manager.monitor.snapshot
+        names = self.cfg.get("device_names") or {}
+        menu = self.menu
+        menu.clear()
+        self._keep = []                    # Qt does not own these; we must
+
+        devices = self.devices(snapshot)
+        if not snapshot.ok:
+            self._disabled(menu, "The helper is not answering")
+        elif not devices:
+            if self.pinned:
+                self._disabled(menu, "The fan this icon follows is gone")
+            else:
+                self._disabled(menu, "No fan controller found")
+                self._disabled(menu, "  try  sudo sensors-detect")
+
+        # The reading goes in the submenu's own title rather than on a disabled
+        # line above it: a machine with six headers would otherwise spend twelve
+        # menu entries saying everything twice.
+        for dev in devices:
+            name = names.get(dev["id"], dev["label"])
+            mode = snapshot.mode_of(dev)
+            title = fmt_device(dev, name, mode,
+                               self.cfg.get("menu_show_rpm", True))
+            if dev.get("control"):
+                self._keep.append(SpeedMenu(
+                    manager, menu, dev,
+                    snapshot.curve_for(dev["id"]).get("enabled", False), title))
+            else:
+                self._disabled(menu, title)
+                self._disabled(menu, "  " + (dev.get("reason") or "monitoring only"))
+        if devices:
+            menu.addSeparator()
+
+        follows = menu.addMenu("This icon follows   %s" % (
+            "everything" if not self.pinned else self.title(snapshot)))
+        group = QActionGroup(follows)
+        group.setExclusive(True)
+        for key, label in [("all", "Everything")] + [
+                (d["id"], names.get(d["id"], d["label"]))
+                for d in snapshot.devices]:
+            action = QAction(label, follows, checkable=True)
+            action.setChecked(key == self.scope)
+            action.triggered.connect(
+                lambda _c=False, k=key: manager.set_icon_scope(self, k))
+            group.addAction(action)
+            follows.addAction(action)
+        self._keep.append(group)
+        add = QAction("Add another icon for…", follows)
+        follows.addSeparator()
+        follows.addAction(add)
+        add.triggered.connect(lambda: manager.open_settings(tab=2))
+
+        if self.cfg.get("menu_show_sensors", True) and snapshot.sensors:
+            temps = menu.addMenu("Temperatures")
+            for sensor in snapshot.sensors:
+                mark = "" if sensor.get("trusted") else "   (unpopulated?)"
+                self._disabled(
+                    temps, f"{sensor['label']}   {sensor['temp']:.0f} °C{mark}")
+
+        look = menu.addMenu("Appearance")
+        self._quick(look, "Icon", icons.ICON_STYLES,
+                    self.cfg.get("icon_style"), "icon_style")
+        self._quick(look, "Colour", COLOR_MODES,
+                    self.cfg.get("color_mode"), "color_mode")
+        self._quick(look, "Motion", icons.ANIMATIONS,
+                    self.cfg.animation_for(self.state), "_animation_all")
+        self._quick(look, "Frame rate",
+                    [(str(v), f"{v} fps") for v in (12, 18, 22, 30, 45, 60)],
+                    str(self.cfg.get("animation_fps")), "animation_fps")
+        self._quick(look, "Badge", [("", "None")] + list(BADGE_SOURCES),
+                    self.cfg.get("badge_source") if self.cfg.get("show_badge")
+                    else "", "_badge")
+
+        settings_action = QAction("Settings…", menu)
+        settings_action.triggered.connect(lambda: manager.open_settings())
+        menu.addAction(settings_action)
+        menu.addSeparator()
+
+        start = QAction("Start with the system", menu, checkable=True)
+        start.setChecked(autostart.is_enabled())
+        start.triggered.connect(manager.toggle_autostart)
+        menu.addAction(start)
+
+        units = snapshot.units
+        if units.get("boot", "") not in ("", "not-found"):
+            boot = QAction("Keep speeds after a reboot", menu, checkable=True)
+            boot.setChecked(units.get("boot") == "enabled")
+            boot.triggered.connect(
+                lambda checked: manager.priv.run(
+                    ["boot", "on" if checked else "off"]))
+            menu.addAction(boot)
+        if units.get("curve", "") not in ("", "not-found"):
+            daemon = QAction("Run fan curves", menu, checkable=True)
+            daemon.setChecked(units.get("curve_active") == "active")
+            daemon.triggered.connect(
+                lambda checked: manager.priv.run(
+                    ["daemon", "on" if checked else "off"]))
+            menu.addAction(daemon)
+
+        menu.addSeparator()
+        check = QAction("Check for updates", menu)
+        check.setEnabled(not manager.updates.busy)
+        check.triggered.connect(manager.check_updates)
+        menu.addAction(check)
+        self._disabled(menu, f"{APP_NAME} KDE {__version__}")
+
+        menu.addSeparator()
+        quit_action = QAction("Quit", menu)
+        quit_action.triggered.connect(QApplication.instance().quit)
+        menu.addAction(quit_action)
+
+    @staticmethod
+    def _disabled(menu: QMenu, text: str) -> None:
+        action = QAction(text, menu)
+        action.setEnabled(False)
+        menu.addAction(action)
+
+    def _quick(self, parent: QMenu, title: str, items, current, key: str) -> None:
+        """A quick-pick submenu whose title carries the current value."""
+        label = dict(items).get(current, "")
+        sub = parent.addMenu(f"{title}   {label}" if label else title)
+        group = QActionGroup(sub)
+        group.setExclusive(True)
+        for item_key, item_label in items:
+            action = QAction(item_label, sub, checkable=True)
+            action.setChecked(item_key == current)
+            action.triggered.connect(
+                lambda _c=False, k=item_key: self.manager.quick_set(key, k))
+            group.addAction(action)
+            sub.addAction(action)
+        self._keep.append(group)
+
+    def _activated(self, reason) -> None:
+        if reason != QSystemTrayIcon.Trigger:
             return
+        action = self.cfg.get("click_action", "menu")
+        if action == "settings":
+            self.manager.open_settings()
+        elif action == "auto":
+            for dev in self.devices(self.manager.monitor.snapshot):
+                if dev.get("control"):
+                    self.manager.priv.run(["set", dev["id"], "auto"])
+        elif action == "menu":
+            self.rebuild_menu()
+            self.menu.popup(self.tray.geometry().center())
+
+
+class FanTray(QObject):
+    """Owns the icons and everything they share."""
+
+    def __init__(self, cfg, monitor, parent=None) -> None:
+        super().__init__(parent)
+        self.cfg = cfg
+        self.monitor = monitor
+        self.priv = system.Privileged(self)
+        self.updates = updates.UpdateChecker(self)
+        self.dialog: settings_ui.SettingsDialog | None = None
+
+        self.icons: list[FanIcon] = []
+        self._last_state = ""
+        self._last_spinning: dict[str, bool] = {}
+        self._last_curve: dict[str, int] = {}
+        self._tray_timer: QTimer | None = None
+        self._tray_waited = 0
+        self._shown = False
+
+        # Motion is driven by the clock, not by the tick count. A tick-based
+        # animation runs slow whenever a frame is late and stalls whenever one
+        # is dropped, and the panel drops plenty: the icon crosses D-Bus on
+        # every frame and plasmashell decodes it on the other side.
+        self._clock = QElapsedTimer()
+        self._clock.start()
+        self._last_frame = 0
+        self._running = False
+        self.anim = QTimer(self)
+        # Qt coarsens any interval of 20 ms or more by default and lets the
+        # kernel coalesce it with other timers, which is exactly the irregular
+        # stutter an animation must not have.
+        self.anim.setTimerType(Qt.PreciseTimer)
+        self.anim.timeout.connect(self._tick)
+
+        monitor.changed.connect(self._on_snapshot)
+        self.priv.result.connect(self._on_priv)
+        self.updates.checked.connect(self._on_update_check)
+
+        self.rebuild_icons()
+
+    # ------------------------------------------------------------- lifetime
+    @property
+    def interval_ms(self) -> int:
+        return int(round(1000.0 / max(5, int(self.cfg.get("animation_fps", 22)))))
+
+    def scopes(self) -> list[str]:
+        """What the config asks for, made safe: never empty, never duplicated."""
+        wanted = self.cfg.get("tray_icons") or ["all"]
+        seen, out = set(), []
+        for scope in wanted:
+            scope = str(scope)
+            if scope and scope not in seen:
+                seen.add(scope)
+                out.append(scope)
+        return out or ["all"]
+
+    def rebuild_icons(self) -> None:
+        wanted = self.scopes()
+        if [i.scope for i in self.icons] == wanted:
+            return
+        for icon in self.icons:
+            icon.dispose()
+        self.icons = [FanIcon(self, scope, self) for scope in wanted]
+        if self._shown:
+            for icon in self.icons:
+                icon.show()
+        self._on_snapshot(self.monitor.snapshot)
+
+    def show(self) -> None:
+        self._shown = True
+        for icon in self.icons:
+            icon.show()
+
+    def wait_for_tray(self) -> None:
+        """Keep trying until somewhere to put the icons turns up.
+
+        Qt answers isSystemTrayAvailable() from whatever is on the session bus
+        at that instant, and an app started from autostart routinely wins the
+        race against the panel registering its watcher. Refusing to run is the
+        wrong answer; wait for it.
+        """
+        self._tray_waited = 0
+        QApplication.instance().setQuitOnLastWindowClosed(True)
+        self._tray_timer = QTimer(self)
+        self._tray_timer.timeout.connect(self._poll_for_tray)
+        self._tray_timer.start(1000)
+
+    def _poll_for_tray(self) -> None:
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self._tray_timer.stop()
+            QApplication.instance().setQuitOnLastWindowClosed(False)
+            self.show()
+            self.monitor.poll()
+            return
+        self._tray_waited += 1
+        if self._tray_waited == 25:
+            QMessageBox.warning(
+                None, APP_NAME,
+                "There is no system tray on this desktop yet, so the icon has "
+                "nowhere to go. It will appear on its own if a panel turns up.")
+
+    # ------------------------------------------------------------ animation
+    def apply_settings(self) -> None:
+        self.monitor.retime()
+        self.rebuild_icons()
+        self._on_snapshot(self.monitor.snapshot)
+
+    def _retime_animation(self) -> None:
+        alive = any(icon.alive for icon in self.icons)
+        if alive:
+            # Only ever started when it is not already running. Calling start()
+            # on a live QTimer throws away the pending timeout, and this runs on
+            # every poll - which cost exactly one dropped frame every 2.5
+            # seconds, forever.
+            if not self._running:
+                self._last_frame = self._clock.elapsed()
+                self.anim.start(self.interval_ms)
+                self._running = True
+            elif self.anim.interval() != self.interval_ms:
+                self.anim.setInterval(self.interval_ms)
+        elif self._running:
+            self.anim.stop()
+            self._running = False
+
+    def _tick(self) -> None:
+        now = self._clock.elapsed()
+        # Capped: after a suspend, or a session frozen behind a modal password
+        # prompt, the gap is enormous, and neither the phase nor the angle
+        # should leap across it.
+        delta = min(max(now - self._last_frame, 0), 250) / 1000.0
+        self._last_frame = now
+        snapshot = self.monitor.snapshot
+        for icon in self.icons:
+            icon.tick(delta, snapshot)
+
+    # ------------------------------------------------------------- polling
+    def _on_snapshot(self, snapshot) -> None:
+        for icon in self.icons:
+            icon.resync(snapshot)
+        self._retime_animation()
+        self._notify_changes(snapshot)
+
+    def _notify_changes(self, snapshot) -> None:
+        """Once for the machine, not once per icon: two icons watching the same
+        overheating CPU should not say so twice."""
+        if not self.cfg.get("notifications_enabled", True):
+            return
+        warn = float(self.cfg.get("warn_temp", 75))
+        critical = float(self.cfg.get("critical_temp", 90))
+        state = resolve_state(snapshot.devices, snapshot.hottest, warn, critical)
         if state != self._last_state:
+            hottest = snapshot.hottest
             if state == "critical" and self.cfg.get("notify_on_critical", True):
-                hottest = snapshot.hottest
                 self.notify("Critically hot",
                             f"The hottest sensor reads {hottest:.0f} °C."
                             if hottest is not None else "Something is very hot.",
                             QSystemTrayIcon.Critical)
             elif state == "warning" and self.cfg.get("notify_on_warning", True):
-                hottest = snapshot.hottest
                 self.notify("Running hot",
                             f"The hottest sensor reads {hottest:.0f} °C."
                             if hottest is not None else "Something is hot.",
@@ -418,136 +684,48 @@ class FanTray(QObject):
 
     def notify(self, title: str, message: str,
                kind=QSystemTrayIcon.Information, ms: int = 5000) -> None:
-        if not self.cfg.get("notifications_enabled", True):
+        if not self.cfg.get("notifications_enabled", True) or not self.icons:
             return
-        self.tray.showMessage(title, message, kind, ms)
+        self.icons[0].tray.showMessage(title, message, kind, ms)
 
-    # ---------------------------------------------------------------- menu
-    def rebuild_menu(self) -> None:
-        """Rebuilt every time it is about to be shown.
+    # ------------------------------------------------------------- actions
+    def set_icon_scope(self, icon: FanIcon, scope: str) -> None:
+        scopes = self.scopes()
+        try:
+            index = self.icons.index(icon)
+        except ValueError:
+            return
+        if index >= len(scopes) or scopes[index] == scope:
+            return
+        if scope in scopes:                 # already shown by another icon
+            self.notify(APP_NAME, "Another icon is already following that fan.")
+            return
+        scopes[index] = scope
+        self.cfg["tray_icons"] = scopes
+        self.cfg.save()
+        self.rebuild_icons()
+        if self.dialog is not None:
+            self.dialog.load_from_config()
 
-        Cheap, and it sidesteps the DBusMenu tick that never gets cleared: every
-        action is new, so nothing stale can accumulate in the panel's copy.
-        """
-        snapshot = self.monitor.snapshot
-        names = self.cfg.get("device_names") or {}
-        menu = self.menu
-        menu.clear()
-        self._keep = []                    # Qt does not own these; we must
+    def hide_device(self, dev_id: str) -> None:
+        hidden = list(self.cfg.get("device_hidden") or [])
+        if dev_id in hidden:
+            return
+        hidden.append(dev_id)
+        self.cfg["device_hidden"] = hidden
+        # An icon pinned to a fan that has just been hidden has nothing to show,
+        # so it goes back to speaking for the machine rather than going blank.
+        scopes = ["all" if s == dev_id else s for s in self.scopes()]
+        self.cfg["tray_icons"] = scopes
+        self.cfg.save()
+        self.monitor.snapshot.hidden = set(hidden)
+        self.rebuild_icons()
+        self.monitor.poll()
+        if self.dialog is not None:
+            self.dialog.load_from_config()
+        self.notify(APP_NAME, "Hidden. The Fans tab in Settings brings it back.")
 
-        if not snapshot.ok:
-            action = QAction("The helper is not answering", menu)
-            action.setEnabled(False)
-            menu.addAction(action)
-        elif not snapshot.devices:
-            action = QAction("No fan controller found", menu)
-            action.setEnabled(False)
-            menu.addAction(action)
-            hint = QAction("  try  sudo sensors-detect", menu)
-            hint.setEnabled(False)
-            menu.addAction(hint)
-
-        # The reading goes in the submenu's own title rather than on a
-        # disabled line above it: a machine with six headers would otherwise
-        # spend twelve menu entries saying everything twice.
-        for dev in snapshot.devices:
-            name = names.get(dev["id"], dev["label"])
-            mode = snapshot.mode_of(dev)
-            title = fmt_device(dev, name, mode,
-                               self.cfg.get("menu_show_rpm", True))
-            if dev.get("control"):
-                self._keep.append(SpeedMenu(
-                    self, menu, dev,
-                    snapshot.curve_for(dev["id"]).get("enabled", False), title))
-            else:
-                line = QAction(title, menu)
-                line.setEnabled(False)
-                menu.addAction(line)
-                note = QAction("  " + (dev.get("reason") or "monitoring only"),
-                               menu)
-                note.setEnabled(False)
-                menu.addAction(note)
-        if snapshot.devices:
-            menu.addSeparator()
-
-        if self.cfg.get("menu_show_sensors", True) and snapshot.sensors:
-            temps = menu.addMenu("Temperatures")
-            for sensor in snapshot.sensors:
-                mark = "" if sensor.get("trusted") else "   (unpopulated?)"
-                action = QAction(
-                    f"{sensor['label']}   {sensor['temp']:.0f} °C{mark}", temps)
-                action.setEnabled(False)
-                temps.addAction(action)
-
-        look = menu.addMenu("Appearance")
-        self._quick(look, "Icon", icons.ICON_STYLES,
-                    self.cfg.get("icon_style"), "icon_style")
-        self._quick(look, "Colour", COLOR_MODES,
-                    self.cfg.get("color_mode"), "color_mode")
-        self._quick(look, "Motion", icons.ANIMATIONS,
-                    self.cfg.animation_for(self.state), "_animation_all")
-        self._quick(look, "Frame rate",
-                    [(str(v), f"{v} fps") for v in (12, 18, 22, 30, 45, 60)],
-                    str(self.cfg.get("animation_fps")), "animation_fps")
-        self._quick(look, "Badge", [("", "None")] + list(BADGE_SOURCES),
-                    self.cfg.get("badge_source") if self.cfg.get("show_badge")
-                    else "", "_badge")
-
-        settings_action = QAction("Settings…", menu)
-        settings_action.triggered.connect(lambda: self.open_settings())
-        menu.addAction(settings_action)
-        menu.addSeparator()
-
-        start = QAction("Start with the system", menu, checkable=True)
-        start.setChecked(autostart.is_enabled())
-        start.triggered.connect(self._toggle_autostart)
-        menu.addAction(start)
-
-        units = snapshot.units
-        if units.get("boot", "") not in ("", "not-found"):
-            boot = QAction("Keep speeds after a reboot", menu, checkable=True)
-            boot.setChecked(units.get("boot") == "enabled")
-            boot.triggered.connect(
-                lambda checked: self.priv.run(["boot", "on" if checked else "off"]))
-            menu.addAction(boot)
-        if units.get("curve", "") not in ("", "not-found"):
-            daemon = QAction("Run fan curves", menu, checkable=True)
-            daemon.setChecked(units.get("curve_active") == "active")
-            daemon.triggered.connect(
-                lambda checked: self.priv.run(["daemon",
-                                               "on" if checked else "off"]))
-            menu.addAction(daemon)
-
-        menu.addSeparator()
-        check = QAction("Check for updates", menu)
-        check.setEnabled(not self.updates.busy)
-        check.triggered.connect(self.check_updates)
-        menu.addAction(check)
-        version = QAction(f"{APP_NAME} KDE {__version__}", menu)
-        version.setEnabled(False)
-        menu.addAction(version)
-
-        menu.addSeparator()
-        quit_action = QAction("Quit", menu)
-        quit_action.triggered.connect(QApplication.instance().quit)
-        menu.addAction(quit_action)
-
-    def _quick(self, parent: QMenu, title: str, items, current, key: str) -> None:
-        """A quick-pick submenu whose title carries the current value."""
-        label = dict(items).get(current, "")
-        sub = parent.addMenu(f"{title}   {label}" if label else title)
-        group = QActionGroup(sub)
-        group.setExclusive(True)
-        for item_key, item_label in items:
-            action = QAction(item_label, sub, checkable=True)
-            action.setChecked(item_key == current)
-            action.triggered.connect(
-                lambda _c=False, k=item_key: self._quick_set(key, k))
-            group.addAction(action)
-            sub.addAction(action)
-        self._keep.append(group)
-
-    def _quick_set(self, key: str, value) -> None:
+    def quick_set(self, key: str, value) -> None:
         if key == "_animation_all":
             self.cfg["animations"] = {state: value
                                       for state in self.cfg["animations"]}
@@ -564,7 +742,7 @@ class FanTray(QObject):
         if self.dialog is not None:
             self.dialog.load_from_config()
 
-    def _toggle_autostart(self, checked: bool) -> None:
+    def toggle_autostart(self, checked: bool) -> None:
         if autostart.set_enabled(checked):
             self.cfg["start_with_system"] = checked
             self.cfg.save()
@@ -573,20 +751,6 @@ class FanTray(QObject):
         else:
             self.notify(APP_NAME, "Could not write the autostart entry.",
                         QSystemTrayIcon.Warning)
-
-    # ------------------------------------------------------------- actions
-    def _activated(self, reason) -> None:
-        if reason != QSystemTrayIcon.Trigger:
-            return
-        action = self.cfg.get("click_action", "menu")
-        if action == "settings":
-            self.open_settings()
-        elif action == "auto":
-            for dev in self.monitor.snapshot.controllable:
-                self.priv.run(["set", dev["id"], "auto"])
-        elif action == "menu":
-            self.rebuild_menu()
-            self.menu.popup(self.tray.geometry().center())
 
     def set_speed(self, dev_id: str, value: str) -> None:
         if value == "0" and self.cfg.get("confirm_zero", True):

@@ -5,7 +5,7 @@ set -euo pipefail
 
 NAME=fan-control-kde
 BIN=fan-control
-VERSION=2.1.1
+VERSION=2.2.0
 RELEASE=1
 MAINT="Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com>"
 URL="https://github.com/gabrielmf1998/Fan-Control-KDE"
@@ -101,6 +101,10 @@ Description: $SUMMARY
  .
  Calibration sweeps a fan and writes down the duty it actually starts at, which
  is the one thing a curve cannot be guessed without.
+ .
+ One icon can speak for the whole machine, or be pinned to a single fan, and
+ there can be as many as you have fans worth watching. Headers the board never
+ populated can be hidden outright.
  .
  53 icon shapes - 30 of them fan rotors, from a three-blade classic through
  sickle, scythe and maple blades to a squirrel cage, a bladeless ring and a

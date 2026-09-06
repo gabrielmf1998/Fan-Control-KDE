@@ -17,10 +17,13 @@ from . import system
 class Snapshot:
     """One reply from `fan-control-helper status`, in a shape the GUI can use."""
 
-    def __init__(self, raw: dict | None = None) -> None:
+    def __init__(self, raw: dict | None = None, hidden=()) -> None:
         raw = raw or {}
         self.raw = raw
-        self.devices: list[dict] = raw.get("devices") or []
+        # Everything the helper found, including what the user has hidden. The
+        # Fans tab needs this one; nothing else should.
+        self.all_devices: list[dict] = raw.get("devices") or []
+        self.hidden = set(hidden or ())
         self.sensors: list[dict] = raw.get("sensors") or []
         self.curves: dict = raw.get("curves") or {}
         self.runtime: dict = raw.get("runtime") or {}
@@ -30,6 +33,12 @@ class Snapshot:
 
     # -- convenience -------------------------------------------------------
     @property
+    def devices(self) -> list[dict]:
+        """Filtered on access, not once in the constructor: hiding a fan has to
+        take effect on the spot, not at whatever the next poll happens to be."""
+        return [d for d in self.all_devices if d["id"] not in self.hidden]
+
+    @property
     def ok(self) -> bool:
         return bool(self.raw)
 
@@ -38,7 +47,9 @@ class Snapshot:
         return [d for d in self.devices if d.get("control")]
 
     def device(self, dev_id: str) -> dict | None:
-        return next((d for d in self.devices if d["id"] == dev_id), None)
+        """Looked up among everything, hidden included: an icon pinned to a fan
+        that was later hidden should say so rather than silently go blank."""
+        return next((d for d in self.all_devices if d["id"] == dev_id), None)
 
     def sensor(self, sid: str) -> dict | None:
         return next((s for s in self.sensors if s["id"] == sid), None)
@@ -80,7 +91,15 @@ class Snapshot:
     def rpms(self) -> list[int]:
         return [r for d in self.devices for r in (d.get("rpms") or []) if r]
 
-    def spin_factor(self, ceilings: dict[str, float]) -> float:
+    def scope(self, only: str = "") -> list[dict]:
+        """The devices one icon speaks for: all of the visible ones, or the
+        single fan it was pinned to."""
+        if not only or only == "all":
+            return self.devices
+        dev = self.device(only)
+        return [dev] if dev else []
+
+    def spin_factor(self, ceilings: dict[str, float], only: str = "") -> float:
         """0.0 when nothing turns, 1.0 at the fastest speed ever seen here.
 
         Driven by measured rpm rather than by the duty asked for: motherboard
@@ -88,8 +107,9 @@ class Snapshot:
         stopped while plainly still turning. `ceilings` is the caller's running
         record of the top speed per device, and is updated in place.
         """
+        devices = self.scope(only)
         vals = []
-        for dev in self.devices:
+        for dev in devices:
             group = [r for r in (dev.get("rpms") or []) if r]
             if not group:
                 continue
@@ -102,22 +122,38 @@ class Snapshot:
             return max(0.0, min(1.0, sum(vals) / len(vals)))
         # No tachometer anywhere: fall back to what was asked for, so the icon
         # still moves on a machine whose fans have no sense wire.
-        pcts = [d.get("percent") for d in self.controllable
-                if d.get("percent") is not None]
+        pcts = [d.get("percent") for d in devices
+                if d.get("control") and d.get("percent") is not None]
         return max(0.0, min(1.0, max(pcts) / 100.0)) if pcts else 0.0
+
+    def top_percent_of(self, only: str = "") -> int:
+        pcts = [d.get("percent") for d in self.scope(only)
+                if d.get("control") and d.get("percent") is not None]
+        return max(pcts) if pcts else 0
 
     @property
     def top_percent(self) -> int:
-        pcts = [d.get("percent") for d in self.controllable
-                if d.get("percent") is not None]
-        return max(pcts) if pcts else 0
+        return self.top_percent_of()
+
+    def hottest_of(self, only: str = "") -> float | None:
+        """For a pinned icon, the temperature that matters is the one beside
+        that fan - not the hottest thing in the machine, which may be an NVMe
+        on the other side of the board."""
+        if not only or only == "all":
+            return self.hottest
+        dev = self.device(only)
+        return (dev or {}).get("temp")
+
+    def rpms_of(self, only: str = "") -> list[int]:
+        return [r for d in self.scope(only) for r in (d.get("rpms") or []) if r]
 
     def fingerprint(self) -> tuple:
         """What has to change before the menu is worth rebuilding."""
         return tuple(
             (d["id"], d.get("label"), d.get("control"),
+             d["id"] in self.hidden,
              bool(self.curve_for(d["id"]).get("enabled")))
-            for d in self.devices
+            for d in self.all_devices
         ) + (self.units.get("curve_active"),)
 
 
@@ -163,7 +199,8 @@ class Monitor(QObject):
             data = json.loads(raw)
         except ValueError:
             data = {}
-        self.snapshot = Snapshot(data if isinstance(data, dict) else {})
+        self.snapshot = Snapshot(data if isinstance(data, dict) else {},
+                                 self.cfg.get("device_hidden") or ())
         fingerprint = self.snapshot.fingerprint()
         if fingerprint != self._fingerprint:
             self._fingerprint = fingerprint

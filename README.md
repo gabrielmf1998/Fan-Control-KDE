@@ -34,9 +34,9 @@ release, checks it against the `SHA256SUMS` published beside it, and installs it
 
 | Distribution | File |
 | --- | --- |
-| Fedora, RHEL, Nobara | `fan-control-kde-2.1.1-1.fc*.noarch.rpm` |
-| Debian, Ubuntu, Mint | `fan-control-kde_2.1.1-1_all.deb` |
-| Arch, Manjaro, CachyOS | `fan-control-kde-2.1.1-1-any.pkg.tar.zst` |
+| Fedora, RHEL, Nobara | `fan-control-kde-2.2.0-1.fc*.noarch.rpm` |
+| Debian, Ubuntu, Mint | `fan-control-kde_2.2.0-1_all.deb` |
+| Arch, Manjaro, CachyOS | `fan-control-kde-2.2.0-1-any.pkg.tar.zst` |
 | Anything else | `Fan-Control-KDE-x86_64.AppImage` |
 
 The AppImage needs `python3` and `PySide6` on the system, and it **cannot ship
@@ -245,6 +245,30 @@ stops it dead for a beat. **Gusts** buffets it, **Stutter** and **Strobed spin**
 freeze it the way a camera does, **Judder** shakes it with no period the eye can
 lock on to, **Airflow** sweeps arcs off the blade tips, and **Glow with the
 heat** brightens with the hottest sensor.
+
+### One icon, or one per fan
+
+A machine with six headers and a graphics card was one icon trying to be all of
+them at once, and a menu with a row about every header the board never
+populated.
+
+**Hide the ones that are not there.** *Settings → Fans* has a tick beside every
+fan and a button that unhides nothing and hides every header reporting no rpm at
+all. Hidden fans leave the menu, the tooltip, the icon's state and the curve
+list — but not the Fans tab, which is where you get them back. Be a little
+careful with the button: a fan with no sense wire spins perfectly well and still
+reads zero.
+
+**Pin an icon to one fan.** *Own tray icon* on any fan gives it an icon of its
+own that shows only it — its speed, its rpm, its temperature, its own rotor
+rate. The whole-machine icon is just another entry in the same list, so you can
+have it as well, or drop it. Any icon's own menu has **This icon follows ▸** to
+repoint it without opening settings, and every fan's submenu has **Hide this
+fan** for the ones you only find out are junk after you look at them.
+
+Tick two fans and you get two icons: a CPU one and a GPU one, instead of one
+icon averaging a 100% case fan and a 53% graphics card into a number that
+describes neither.
 
 ![States](docs/states.png)
 

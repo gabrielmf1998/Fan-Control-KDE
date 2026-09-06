@@ -1,7 +1,7 @@
 %global bin fan-control
 
 Name:           fan-control-kde
-Version:        2.1.1
+Version:        2.2.0
 Release:        1%{?dist}
 Summary:        Tray applet for fan speed, fan curves and temperatures
 
@@ -39,6 +39,10 @@ runs with nothing loaded at all.
 
 Calibration sweeps a fan and writes down the duty it actually starts turning at,
 which is the one thing a curve cannot be guessed without.
+
+One icon can speak for the whole machine, or be pinned to a single fan, and
+there can be as many as you have fans worth watching. Headers the board never
+populated can be hidden outright.
 
 53 icon shapes, 30 of them fan rotors - a three-blade classic, sickle, scythe
 and maple blades, a squirrel cage, a bladeless ring, a counter-rotating pair -
@@ -130,6 +134,17 @@ gtk-update-icon-cache %{_datadir}/icons/hicolor &>/dev/null || :
 %dir %{_sysconfdir}/fan-control-kde
 
 %changelog
+* Sun Sep 06 2026 Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com> - 2.2.0-1
+- Fans can be hidden. A board wires more headers than it populates and the
+  empty ones are still real pwm channels the kernel reports at 100%, so they
+  filled the menu and the tooltip with rows about nothing. One button hides
+  every header reporting no rpm; the Fans tab brings any of them back
+- An icon can be pinned to a single fan instead of speaking for the whole
+  machine, so it stops averaging the CPU header and the graphics card into one
+  number that describes neither
+- More than one icon: tick "Own tray icon" on as many fans as you like and get
+  one each, with its own state, its own rotor speed and its own menu
+
 * Sat Sep 05 2026 Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com> - 2.1.1-1
 - The animation no longer stutters. Three separate causes: the frame timer was
   restarted on every poll, which threw away the pending frame once every 2.5
