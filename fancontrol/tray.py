@@ -759,7 +759,12 @@ class FanTray(QObject):
         change with it would make per-icon looks useless the moment you touched
         the menu.
         """
-        own = icon.look.has_own_look if icon is not None else False
+        # A pinned icon's own menu edits that icon, the same way naming it in
+        # the settings window does. The whole-machine icon is the machine, so
+        # its menu edits the shared look unless it has been given one of its own.
+        own = icon is not None and (icon.pinned or icon.look.has_own_look)
+        if own and self.cfg.icon_look(icon.scope) is None:
+            self.cfg.set_icon_look(icon.scope, self.cfg.shared_look())
         look = dict(self.cfg.icon_look(icon.scope)) if own else None
 
         def put(k, v):

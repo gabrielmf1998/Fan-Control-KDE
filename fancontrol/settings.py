@@ -415,6 +415,7 @@ class SettingsDialog(QDialog):
         self.target_hint = _hint("")
         target_row.addWidget(self.target_hint, 1)
         self._target_scope = ""
+        self._loading = False
 
         self.tabs = tabs = QTabWidget(self)
         tabs.addTab(self._build_appearance(), "Appearance")
@@ -566,6 +567,15 @@ class SettingsDialog(QDialog):
 
         self.animate_idle = QCheckBox("Keep animating while the fans are stopped")
         sform.addRow("", self.animate_idle)
+
+        # These few change nothing a preview can show, so they have to say they
+        # were touched themselves or an icon named above would not get its own
+        # look until something else was moved.
+        for widget in (self.anim_speed, self.spin_min, self.spin_max):
+            widget.valueChanged.connect(self._touch_appearance)
+        self.spin_source.currentIndexChanged.connect(self._touch_appearance)
+        for box in (self.animate_idle, self.smooth_rotation):
+            box.toggled.connect(self._touch_appearance)
         lay.addWidget(speed)
 
         colour = QGroupBox("Colour")
@@ -1519,8 +1529,21 @@ class SettingsDialog(QDialog):
             self.target_hint.setText("Changes here apply to this icon alone.")
         else:
             self.target_hint.setText(
-                "This icon follows the shared look. Tick the box to give it "
-                "one of its own.")
+                "Changes here apply to this icon alone — it will be given a "
+                "look of its own as soon as you change something. Untick the "
+                "box to put it back on the shared look.")
+
+    def _touch_appearance(self) -> None:
+        """An appearance control moved while an icon was named above.
+
+        The override is created right then, so the tickbox and the hint say
+        what is about to happen before Apply is pressed rather than after.
+        """
+        scope = self._target_scope
+        if self._loading or not scope or self.cfg.icon_look(scope) is not None:
+            return
+        self.cfg.set_icon_look(scope, self.cfg.shared_look())
+        self._sync_target_controls()
 
     def _look(self):
         """The settings object the Appearance and States tabs are editing."""
@@ -1530,10 +1553,16 @@ class SettingsDialog(QDialog):
         return self.cfg
 
     def _store_appearance(self, scope: str) -> None:
-        """Write what the controls currently say into wherever it belongs."""
+        """Write what the controls currently say into wherever it belongs.
+
+        Naming an icon at the top of the window *is* the instruction to edit
+        that icon. If it had no look of its own yet it gets one here rather
+        than the change landing on every icon at once, which is exactly the
+        trap this used to be.
+        """
         values = {k: v for k, v in self._collect().items()
                   if k in ICON_APPEARANCE_KEYS}
-        if scope and self.cfg.icon_look(scope) is not None:
+        if scope:
             self.cfg.set_icon_look(scope, values)
         else:
             self.cfg.update(values)
@@ -1560,6 +1589,13 @@ class SettingsDialog(QDialog):
 
     # ================================================== load and save
     def load_from_config(self) -> None:
+        self._loading = True
+        try:
+            self._load_from_config()
+        finally:
+            self._loading = False
+
+    def _load_from_config(self) -> None:
         cfg = self.cfg
         # Appearance comes from whichever icon is being edited; everything else
         # is the machine's, not any one icon's.
@@ -1671,9 +1707,11 @@ class SettingsDialog(QDialog):
             return False
         autostart.set_enabled(values["start_with_system"])
         scope = self._target_scope
-        if scope and self.cfg.icon_look(scope) is not None:
-            # Editing one icon: its appearance goes to it, and everything else
-            # in this window is still the machine's.
+        if scope:
+            # An icon is named at the top of the window, so its appearance goes
+            # to it - whether or not it already had one of its own. Writing to
+            # the shared look here would change every icon at once, which is
+            # the opposite of what naming one of them asks for.
             self.cfg.set_icon_look(
                 scope, {k: v for k, v in values.items()
                         if k in ICON_APPEARANCE_KEYS})
@@ -1794,6 +1832,7 @@ class SettingsDialog(QDialog):
             self._base_ctx())
 
     def _sync_previews(self) -> None:
+        self._touch_appearance()
         ctx = self._base_ctx()
         for key, preview in self._previews.items():
             preview.style_key = self.style_gallery.current()

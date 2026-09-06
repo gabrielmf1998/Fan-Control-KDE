@@ -1,7 +1,7 @@
 %global bin fan-control
 
 Name:           fan-control-kde
-Version:        2.3.0
+Version:        2.3.1
 Release:        1%{?dist}
 Summary:        Tray applet for fan speed, fan curves and temperatures
 
@@ -135,6 +135,15 @@ gtk-update-icon-cache %{_datadir}/icons/hicolor &>/dev/null || :
 %dir %{_sysconfdir}/fan-control-kde
 
 %changelog
+* Sun Sep 06 2026 Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com> - 2.3.1-1
+- Naming an icon in "Appearance for" now edits that icon, full stop. It used to
+  need a separate tickbox as well, and with the box unticked Apply wrote to the
+  shared look and changed every icon at once - the exact opposite of what
+  naming one of them asks for
+- The tickbox ticks itself as soon as an appearance control is moved, so what
+  is about to happen is visible before Apply rather than after
+- A pinned icon's own Appearance menu edits that icon too, for the same reason
+
 * Sun Sep 06 2026 Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com> - 2.3.0-1
 - Each tray icon can have an appearance of its own: its own shape, colours,
   animations, badge, size and rotation range. A CPU icon and a GPU icon no

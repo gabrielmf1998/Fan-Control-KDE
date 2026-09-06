@@ -5,7 +5,7 @@ set -euo pipefail
 
 NAME=fan-control-kde
 BIN=fan-control
-VERSION=2.3.0
+VERSION=2.3.1
 RELEASE=1
 MAINT="Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com>"
 URL="https://github.com/gabrielmf1998/Fan-Control-KDE"

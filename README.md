@@ -34,9 +34,9 @@ release, checks it against the `SHA256SUMS` published beside it, and installs it
 
 | Distribution | File |
 | --- | --- |
-| Fedora, RHEL, Nobara | `fan-control-kde-2.3.0-1.fc*.noarch.rpm` |
-| Debian, Ubuntu, Mint | `fan-control-kde_2.3.0-1_all.deb` |
-| Arch, Manjaro, CachyOS | `fan-control-kde-2.3.0-1-any.pkg.tar.zst` |
+| Fedora, RHEL, Nobara | `fan-control-kde-2.3.1-1.fc*.noarch.rpm` |
+| Debian, Ubuntu, Mint | `fan-control-kde_2.3.1-1_all.deb` |
+| Arch, Manjaro, CachyOS | `fan-control-kde-2.3.1-1-any.pkg.tar.zst` |
 | Anything else | `Fan-Control-KDE-x86_64.AppImage` |
 
 The AppImage needs `python3` and `PySide6` on the system, and it **cannot ship
@@ -284,14 +284,19 @@ icon a three-blade classic in heat colours and the GPU icon a graphics-card
 outline in green, and you can tell at a glance which is which without hovering
 anything.
 
-An icon either follows the shared look or has a complete one of its own —
-there is no third state, because a per-control "inherited" tickbox is a lot of
-interface for very little. Ticking the box seeds it from whatever is shared
-right now, so it changes nothing visible; it only decides where the *next*
-change lands. Unticking hands it straight back.
+**Naming an icon there is the instruction to edit it.** Change anything and it
+gets a look of its own on the spot — the tickbox ticks itself so you can see it
+happen — and Apply never touches the shared look while an icon is named. Untick
+the box to hand that icon straight back to the shared look.
 
-The same toggle is in each icon's own **Appearance** menu in the tray, and
-picking a shape there changes that icon alone once it has a look of its own.
+An icon either follows the shared look or has a complete one of its own — there
+is no third state, because a per-control "inherited" tickbox is a lot of
+interface for very little, and it turns "why is this one blue" into a question
+with two answers.
+
+A pinned icon's own **Appearance** menu in the tray edits that icon for the same
+reason. The whole-machine icon's menu edits the shared look, because that icon
+*is* the machine.
 
 The one thing that stays shared is the **frame rate**: one timer drives every
 icon, and it cannot redraw two of them at two different rates without one of
