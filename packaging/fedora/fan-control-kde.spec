@@ -1,7 +1,7 @@
 %global bin fan-control
 
 Name:           fan-control-kde
-Version:        2.1.0
+Version:        2.1.1
 Release:        1%{?dist}
 Summary:        Tray applet for fan speed, fan curves and temperatures
 
@@ -130,6 +130,21 @@ gtk-update-icon-cache %{_datadir}/icons/hicolor &>/dev/null || :
 %dir %{_sysconfdir}/fan-control-kde
 
 %changelog
+* Sat Sep 05 2026 Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com> - 2.1.1-1
+- The animation no longer stutters. Three separate causes: the frame timer was
+  restarted on every poll, which threw away the pending frame once every 2.5
+  seconds; motion was counted in ticks rather than in seconds, so a late frame
+  slowed the animation instead of catching it up; and the timer was a coarse
+  one, which Qt lets the kernel coalesce with other timers
+- The icon is one pixmap per frame now, not four. The panel decodes every frame
+  on the other side of D-Bus, and being handed four images for a cell that
+  draws one of them made it quietly coalesce frames
+- Rotation is held below the rate at which the blades strobe. An 18-blade jet
+  turbine repeats every 20 degrees, so at full rpm and 30 fps it was advancing
+  three quarters of a blade per frame - past the halfway point where the eye
+  stops seeing rotation and starts seeing a wagon wheel running backwards.
+  There is a switch for it in Appearance for anyone who wants the literal rpm
+
 * Sat Sep 05 2026 Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com> - 2.1.0-1
 - 22 more icon shapes, all of them fans: paddle, 7/9/11-blade axial, sickle,
   scythe, maple, helix, star, turbofan, shrouded, ducted, squirrel cage, water

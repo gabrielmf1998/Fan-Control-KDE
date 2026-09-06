@@ -154,6 +154,44 @@ ROTATING = {"spin", "spin_reverse", "spin_pulse", "spin_glow", "rev", "gust",
             "swing", "windup", "winddown", "brake", "dual_dir", "strobe_spin",
             "judder", "tilt"}
 
+# How many times a shape repeats itself in one turn.
+#
+# This is the number that decides whether rotation reads as rotation. A shape
+# with N-fold symmetry looks *identical* every 360/N degrees, so once it turns
+# more than about a third of that between two frames the eye stops seeing it
+# move: first it strobes, then - past half a period - it appears to run
+# backwards, which is the wagon-wheel effect from every western ever filmed.
+#
+# A three-blade fan gets away with a lot. An eighteen-blade jet turbine at the
+# same rpm and the same frame rate is a still picture that twitches.
+ROTOR_SYMMETRY = {
+    "classic": 3, "triblade": 3, "pinwheel": 4, "propeller": 2, "paddle": 4,
+    "axial7": 7, "axial9": 9, "slimfan": 11, "sickle": 5, "scythe": 5,
+    "maple": 3, "helix": 3, "starfan": 5, "turbine": 7, "turbofan": 12,
+    "jet": 18, "ringfan": 7, "ducted": 4, "blower": 14, "squirrel": 16,
+    "waterwheel": 8, "impeller": 6, "spiral": 3, "vortex": 5, "ceiling": 4,
+    "windmill": 4, "leaf": 3, "snowflake": 6, "cog": 10, "orbit": 6,
+    # For a framed shape it is the rotor inside the housing that matters; the
+    # housing does not turn at all.
+    "casefan": 5, "pwmfan": 7, "hexfan": 6, "roundfan": 7, "caged": 5,
+    "deskfan": 4, "exhaust": 6, "crossflow": 2, "bladeless": 3, "stacked": 7,
+    "dualfan": 5, "radiator": 5, "tower": 5, "heatpipe": 7, "aio": 6,
+    "cpu": 5, "gpu": 5,
+}
+
+# A third of one symmetry period: comfortably under the half that strobes, and
+# still fast enough that a fan at full tilt plainly looks like it.
+SMOOTH_FRACTION = 1.0 / 3.0
+
+
+def max_step_degrees(style: str) -> float:
+    """The most this shape may turn between two frames and still read as
+    turning. Meters have no rotation, so they are given a free hand."""
+    if style in METER_STYLES:
+        return 360.0
+    return 360.0 * SMOOTH_FRACTION / ROTOR_SYMMETRY.get(style, 3)
+
+
 BADGE_STYLES = [
     ("circle", "Circle"),
     ("pill",   "Pill"),

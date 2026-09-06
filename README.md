@@ -34,9 +34,9 @@ release, checks it against the `SHA256SUMS` published beside it, and installs it
 
 | Distribution | File |
 | --- | --- |
-| Fedora, RHEL, Nobara | `fan-control-kde-2.1.0-1.fc*.noarch.rpm` |
-| Debian, Ubuntu, Mint | `fan-control-kde_2.1.0-1_all.deb` |
-| Arch, Manjaro, CachyOS | `fan-control-kde-2.1.0-1-any.pkg.tar.zst` |
+| Fedora, RHEL, Nobara | `fan-control-kde-2.1.1-1.fc*.noarch.rpm` |
+| Debian, Ubuntu, Mint | `fan-control-kde_2.1.1-1_all.deb` |
+| Arch, Manjaro, CachyOS | `fan-control-kde-2.1.1-1-any.pkg.tar.zst` |
 | Anything else | `Fan-Control-KDE-x86_64.AppImage` |
 
 The AppImage needs `python3` and `PySide6` on the system, and it **cannot ship
@@ -325,6 +325,17 @@ duty instead.
 
 **The icon is not moving.** *Keep animating while the fans are stopped* is off
 and the fans are stopped, which is the icon telling you the truth.
+
+**A many-bladed shape looks like it is barely turning, or turning backwards.**
+That is aliasing, and it is the reason *Hold rotation below the speed at which
+the blades strobe* exists in Appearance and is on by default. A shape looks
+identical every time it turns by one blade, so past about a third of that per
+frame the eye stops seeing rotation: first it strobes, then — past half a blade
+per frame — it runs backwards, the same wagon-wheel effect as in every western
+ever filmed. An 18-blade jet turbine repeats every 20°, so at 444 °/s and 30 fps
+it advances three quarters of a blade per frame. The cap is per shape: a
+three-blade fan is never touched at all. Turn it off if you would rather have
+the literal rpm and the strobing that comes with it.
 
 ---
 

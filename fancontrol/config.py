@@ -164,6 +164,11 @@ DEFAULTS: dict = {
     "spin_source": "rpm",            # rpm | percent | fixed
     "spin_min_dps": 36.0,
     "spin_max_dps": 444.0,
+    # Hold the rotation below the rate at which the blades start to strobe.
+    # An 18-blade turbine repeats itself every 20 degrees, so at 444 deg/s and
+    # 30 fps it advances three quarters of a blade per frame and the eye reads
+    # it as jittering backwards rather than spinning.
+    "smooth_rotation": True,
 
     # ------------------------------------------------ badge
     "show_badge": False,

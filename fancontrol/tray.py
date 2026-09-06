@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QObject, QTimer
-from PySide6.QtGui import QAction, QActionGroup
+from PySide6.QtCore import QElapsedTimer, QObject, Qt, QTimer
+from PySide6.QtGui import QAction, QActionGroup, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QMenu,
@@ -119,7 +119,15 @@ class FanTray(QObject):
         self.phase = 0.0
         self.angle = 0.0
         self.factor = 0.0
-        self.step = 0.0
+        # Motion is driven by the clock, not by the tick count. A tick-based
+        # animation runs slow whenever a frame is late and stalls whenever one
+        # is dropped, and the panel drops plenty: the icon crosses D-Bus on
+        # every frame and plasmashell decodes it on the other side.
+        self.deg_per_sec = 0.0
+        self.max_step = 360.0
+        self._clock = QElapsedTimer()
+        self._clock.start()
+        self._last_frame = 0
         self._ceilings: dict[str, float] = {}
         self._spinning = False
         self._last_state = ""
@@ -138,6 +146,10 @@ class FanTray(QObject):
         self.tray.setContextMenu(self.menu)
 
         self.anim = QTimer(self)
+        # Qt coarsens any interval of 20 ms or more by default and lets the
+        # kernel coalesce it with other timers, which is exactly the irregular
+        # stutter an animation must not have.
+        self.anim.setTimerType(Qt.PreciseTimer)
         self.anim.timeout.connect(self._tick)
 
         monitor.changed.connect(self._on_snapshot)
@@ -207,19 +219,29 @@ class FanTray(QObject):
         lo = float(self.cfg.get("spin_min_dps", 36.0))
         hi = float(self.cfg.get("spin_max_dps", 444.0))
         speed = float(self.cfg.get("animation_speed", 1.0))
-        per_tick = speed * self.interval_ms / 1000.0
         if drive > 0:
-            self.step = (lo + drive * (hi - lo)) * per_tick
+            self.deg_per_sec = (lo + drive * (hi - lo)) * speed
         elif animation in icons.ROTATING and self.cfg.get("animate_when_idle", True):
             # Nothing is turning, but the user asked for movement anyway: give
             # it the slow end of the range rather than freezing the icon.
-            self.step = lo * per_tick
+            self.deg_per_sec = lo * speed
         else:
-            self.step = 0.0
+            self.deg_per_sec = 0.0
+
+        self.max_step = (icons.max_step_degrees(self.cfg.get("icon_style", "classic"))
+                         if self.cfg.get("smooth_rotation", True) else 360.0)
 
         if alive:
-            self.anim.start(self.interval_ms)
-            self._spinning = True
+            # Only ever started when it is not already running. Calling start()
+            # on a live QTimer throws away the pending timeout, and this runs on
+            # every poll - which cost exactly one dropped frame every 2.5
+            # seconds, forever.
+            if not self._spinning:
+                self._last_frame = self._clock.elapsed()
+                self.anim.start(self.interval_ms)
+                self._spinning = True
+            elif self.anim.interval() != self.interval_ms:
+                self.anim.setInterval(self.interval_ms)
         elif self._spinning:
             self.anim.stop()
             self._spinning = False
@@ -227,9 +249,16 @@ class FanTray(QObject):
             self._refresh_icon()
 
     def _tick(self) -> None:
-        self.phase += self.interval_ms / 1000.0 * float(
-            self.cfg.get("animation_speed", 1.0))
-        self.angle = (self.angle + self.step) % 360.0
+        now = self._clock.elapsed()
+        # Capped: after a suspend, or a session frozen behind a modal password
+        # prompt, the gap is enormous, and neither the phase nor the angle
+        # should leap across it.
+        delta = min(max(now - self._last_frame, 0), 250) / 1000.0
+        self._last_frame = now
+        self.phase += delta * float(self.cfg.get("animation_speed", 1.0))
+        # Whatever the clock says, never turn far enough in one frame to strobe.
+        self.angle = (self.angle
+                      + min(self.deg_per_sec * delta, self.max_step)) % 360.0
         self._refresh_icon()
 
     # ---------------------------------------------------------------- icon
@@ -294,13 +323,20 @@ class FanTray(QObject):
         return self.cfg.color_for(self.state)
 
     def _refresh_icon(self) -> None:
+        """One pixmap, not four.
+
+        Every frame of this crosses D-Bus and is decoded by the panel on the
+        other side. Handing it a whole QIcon of sizes meant four images per
+        frame for a cell that draws one of them, and the panel answered by
+        quietly coalescing frames - which is what an animation resetting
+        actually looks like from the outside.
+        """
         snapshot = self.monitor.snapshot
         size = int(self.cfg.get("icon_size", 48))
-        sizes = tuple(sorted({22, 24, 32, size}))
-        self.tray.setIcon(icons.render_icon(
-            self.cfg.get("icon_style", "classic"), self._color(snapshot),
+        self.tray.setIcon(QIcon(icons.render_pixmap(
+            size, self.cfg.get("icon_style", "classic"), self._color(snapshot),
             self.cfg.animation_for(self.state), self.phase, self.angle,
-            self._context(snapshot), sizes))
+            self._context(snapshot))))
 
     # ------------------------------------------------------------- polling
     def _on_snapshot(self, snapshot) -> None:

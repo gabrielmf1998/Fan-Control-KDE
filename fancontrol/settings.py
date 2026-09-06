@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from PySide6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QElapsedTimer, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QFontMetrics, QIcon, QPainter
 from PySide6.QtWidgets import (
     QApplication,
@@ -383,9 +383,13 @@ class SettingsDialog(QDialog):
         root.addWidget(self.status)
         root.addWidget(buttons)
 
+        self._clock = QElapsedTimer()
+        self._clock.start()
+        self._last_frame = 0
         self._timer = QTimer(self)
+        self._timer.setTimerType(Qt.PreciseTimer)
         self._timer.timeout.connect(self._animate)
-        self._timer.start(45)
+        self._timer.start(33)
 
         monitor.changed.connect(self._on_snapshot)
         priv.result.connect(self._on_priv)
@@ -487,6 +491,17 @@ class SettingsDialog(QDialog):
         self.spin_max.setSuffix(" °/s")
         self.spin_max.setSingleStep(12.0)
         sform.addRow("Fastest rotation", self.spin_max)
+
+        self.smooth_rotation = QCheckBox(
+            "Hold rotation below the speed at which the blades strobe")
+        sform.addRow("", self.smooth_rotation)
+        sform.addRow("", _hint(
+            "A shape looks identical every time it turns by one blade, so past "
+            "about a third of that per frame the eye stops seeing rotation and "
+            "starts seeing a strobe — then a wagon wheel running backwards. "
+            "This caps the rate per shape: a three-blade fan is never touched, "
+            "an eighteen-blade turbine is held to a third of it. Turn it off to "
+            "get the literal rpm and the strobing with it."))
 
         self.animate_idle = QCheckBox("Keep animating while the fans are stopped")
         sform.addRow("", self.animate_idle)
@@ -1295,6 +1310,7 @@ class SettingsDialog(QDialog):
         self.spin_min.setValue(float(cfg["spin_min_dps"]))
         self.spin_max.setValue(float(cfg["spin_max_dps"]))
         self.animate_idle.setChecked(bool(cfg["animate_when_idle"]))
+        self.smooth_rotation.setChecked(bool(cfg["smooth_rotation"]))
         _set_data(self.color_mode, cfg["color_mode"])
         self.mono_color.set_color(cfg["mono_color"])
         self.mode_dot.setChecked(bool(cfg["mode_dot"]))
@@ -1344,6 +1360,7 @@ class SettingsDialog(QDialog):
             "animation_fps": self.fps.value(),
             "animation_speed": self.anim_speed.value(),
             "animate_when_idle": self.animate_idle.isChecked(),
+            "smooth_rotation": self.smooth_rotation.isChecked(),
             "spin_source": self.spin_source.currentData(),
             "spin_min_dps": self.spin_min.value(),
             "spin_max_dps": self.spin_max.value(),
@@ -1423,8 +1440,17 @@ class SettingsDialog(QDialog):
 
     # ============================================== live, every tick
     def _animate(self) -> None:
-        self._phase += 0.045 * self.anim_speed.value()
-        self._angle = (self._angle + 4.0 * self.anim_speed.value()) % 360.0
+        # Same clock-driven motion the tray uses, so what is previewed here is
+        # what the panel will actually show.
+        now = self._clock.elapsed()
+        delta = min(max(now - self._last_frame, 0), 250) / 1000.0
+        self._last_frame = now
+        speed = self.anim_speed.value()
+        self._phase += delta * speed
+        step = 150.0 * speed * delta
+        if self.smooth_rotation.isChecked():
+            step = min(step, icons.max_step_degrees(self.style_gallery.current()))
+        self._angle = (self._angle + step) % 360.0
         self.strip.phase = self._phase
         self.strip.angle = self._angle
         self.strip.update()
