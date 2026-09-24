@@ -105,9 +105,13 @@ verify() {
     fi
     curl -fsSL "$sums" -o "$tmp/SHA256SUMS" || {
         warn "could not fetch SHA256SUMS; skipping the check"; return; }
-    want="$(awk -v n="$(basename "$file")" \
-        '{ sub(/^\.\//, "", $2); sub(/^\*/, "", $2); if ($2 == n) print $1 }' \
-        "$tmp/SHA256SUMS")"
+    # Plain sh rather than awk: a minimal install may not have awk.
+    want=""
+    base="$(basename "$file")"
+    while read -r sum name; do
+        name="${name#./}"; name="${name#\*}"
+        if [ "$name" = "$base" ]; then want="$sum"; break; fi
+    done < "$tmp/SHA256SUMS"
     [ -n "$want" ] || err "SHA256SUMS does not mention $(basename "$file")"
     got="$(sha256sum "$file" | cut -d' ' -f1)"
     [ "$want" = "$got" ] || err "checksum mismatch — nothing was installed"
