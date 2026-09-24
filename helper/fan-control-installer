@@ -53,11 +53,21 @@ def package_name(path):
     return ""
 
 
+def have(program):
+    return any(os.access(os.path.join(d, program), os.X_OK)
+               for d in ("/usr/bin", "/usr/sbin", "/bin", "/sbin"))
+
+
 def install(path):
     if path.endswith(".rpm"):
+        # dnf on Fedora and its family, zypper on openSUSE; the package is not
+        # signed, and its checksum has already been checked against the one
+        # published with the release.
         for manager in (["dnf", "install", "-y", path],
+                        ["zypper", "--non-interactive", "install",
+                         "--allow-unsigned-rpm", "--oldpackage", path],
                         ["rpm", "-Uvh", "--force", path]):
-            if run(["which", manager[0]], timeout=10).returncode == 0:
+            if have(manager[0]):
                 return run(manager)
         return None
     if path.endswith(".deb"):

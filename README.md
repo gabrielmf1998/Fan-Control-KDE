@@ -1,8 +1,9 @@
 # Fan Control KDE
 
 Every fan the machine will admit to having, in the system tray. Set a speed by
-hand, hand a fan back to its firmware, or draw a fan curve on a graph and have a
-small system service run it.
+hand, hand a fan back to its firmware, or draw a fan curve on a graph. A small
+system service keeps every speed where you put it, puts it all back after a
+reboot, and runs the curves.
 
 ![Icon styles](docs/icon-styles.png)
 
@@ -14,7 +15,8 @@ hottest sensor, and follow the panel's own foreground in light and dark themes.
 
 ## Install
 
-One line, on Fedora, Debian, Ubuntu, Arch and their derivatives:
+One line, on Fedora, openSUSE, Debian, Ubuntu, Arch and their derivatives -
+Kubuntu, KDE neon, Nobara, Manjaro, EndeavourOS and CachyOS included:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/gabrielmf1998/Fan-Control-KDE/main/install-online.sh | sh
@@ -28,21 +30,27 @@ curl -fsSL https://gitlab.com/gabriel17166/fan-control-kde/-/raw/main/install-on
 
 It works out which package your distribution wants, takes it from the latest
 release, checks it against the `SHA256SUMS` published beside it, and installs it.
+Where the distribution packages no PySide6 - Ubuntu 24.04 and everything built
+on it, and Debian 12 - it brings its own, as a second package.
 
 <details>
 <summary>Or take a package from the release page</summary>
 
 | Distribution | File |
 | --- | --- |
-| Fedora, RHEL, Nobara | `fan-control-kde-2.3.1-1.fc*.noarch.rpm` |
-| Debian, Ubuntu, Mint | `fan-control-kde_2.3.1-1_all.deb` |
-| Arch, Manjaro, CachyOS | `fan-control-kde-2.3.1-1-any.pkg.tar.zst` |
+| Fedora, RHEL, Nobara, openSUSE | `fan-control-kde-2.4.0-1.fc*.noarch.rpm` |
+| Debian, Ubuntu, Kubuntu, KDE neon, Mint | `fan-control-kde_2.4.0-1_all.deb` |
+| ...plus, where there is no PySide6 (Ubuntu 24.04 and its family, Debian 12) | `fan-control-kde-pyside6_6.10.3-1_amd64.deb` |
+| Arch, Manjaro, EndeavourOS, CachyOS | `fan-control-kde-2.4.0-1-any.pkg.tar.zst` |
 | Anything else | `Fan-Control-KDE-x86_64.AppImage` |
 
-The AppImage needs `python3` and `PySide6` on the system, and it **cannot ship
-the privileged helper** — `pkexec` will only run a real file on disk that a
-polkit policy names by path. Without a packaged install it can neither read nor
-change anything, because every fan control on Linux needs root.
+Install the two `.deb` files together: `sudo apt install ./fan-control-kde_*.deb`.
+
+The AppImage needs `python3` on the system, and uses the system's PySide6 when
+there is one or the copy inside when there is not. It **cannot ship the
+privileged helper** — `pkexec` will only run a real file on disk that a polkit
+policy names by path — so on its own it can watch the fans but not change them,
+because every fan control on Linux needs root.
 
 </details>
 
@@ -115,25 +123,20 @@ RDNA3-and-newer on Linux 6.13 or later.
 
 ### NVIDIA
 
-GeForce, Quadro and RTX cards, through `nvidia-settings`. It needs two things
-that have nothing to do with this program:
+GeForce, Quadro and RTX cards, through **NVML** — the driver's own library, the
+one `nvidia-smi` is built on. It needs no X display and no `Coolbits`: it works
+on a Wayland session, and from the background service before anyone has logged
+in, which is where a speed has to be put back after a reboot. Every speed is
+read back afterwards, so what you are told is what the driver actually kept.
 
-* **`Coolbits` in the X configuration.** `sudo nvidia-xconfig --cool-bits=28`,
-  or an `Option "Coolbits" "28"` line in the `OutputClass` section of
-  `/usr/share/X11/xorg.conf.d/10-nvidia.conf`. Without it the driver refuses
-  every fan write — and exits 0 while doing so, which is why this reads the
-  speed back afterwards and tells you what the driver actually kept.
-* **An X or XWayland display.** `nvidia-settings` has no Wayland-native path
-  yet. On a Plasma Wayland session it works through XWayland, which is what the
-  helper points it at.
+That takes driver 520 or newer. On an older one the helper falls back to
+`nvidia-settings`, which needs `Coolbits` in the X configuration
+(`sudo nvidia-xconfig --cool-bits=28`) and an X or XWayland display.
 
 Most GeForce cards clamp their minimum to about 30%; the range the driver
 reports is read out of it, and the menu will not offer anything below it. NVIDIA
 exposes no firmware fan curve to Linux, so a curve on an NVIDIA card is run by
 the background service.
-
-`nvidia-smi` is used for the readings — speed, temperature and utilisation — and
-cannot set anything.
 
 ### Intel
 
@@ -189,10 +192,15 @@ Take the measurement, pick a style, and it builds a curve that respects it.
 
 ### Where a curve runs
 
-**In a system service.** `fan-control-kde-curve.service` applies curves whether
-or not anyone is logged in, and hands every fan it touched back to the firmware
-when it stops — a curve daemon that dies must not leave a fan at 20% while the
-CPU cooks. Above 95 °C every curve is overridden and the fan goes to 100%; a fan
+**In a system service.** Press *Apply and run* and the curve is saved, switched
+on, and run by `fan-control-kde-daemon.service` from then on — now, and after
+every reboot, whether or not anyone is logged in — until you press *Stop this
+curve* or set that fan's speed by hand. Stopping it puts the fan back on the
+speed you last set by hand, or hands it to the firmware if you never set one.
+
+The service hands every fan a curve was driving back to the firmware when it
+stops — a curve daemon that dies must not leave a fan at 20% while the CPU
+cooks. Above 95 °C every curve is overridden and the fan goes to 100%; a fan
 curve is a comfort setting and that part is not negotiable. If a curve's
 temperature source stops answering, that fan goes to 70% rather than to silence.
 
@@ -326,16 +334,40 @@ unpopulated ones marked.
 
 ---
 
+## What it keeps, and for how long
+
+Everything you set is kept, and nothing needs a *Save* button:
+
+* **A speed set by hand** — from the menu, the slider or the *Max* button — is
+  applied at once, written to `/etc/fan-control-kde/state.json`, and kept by
+  the background service. It looks at every fan it is keeping every two
+  seconds, and puts it back if anything moved it: the firmware, a driver,
+  another tool. The journal says each time
+  (`journalctl -u fan-control-kde-daemon`), and the Fans tab shows how often.
+* **After a reboot** the service puts every speed back as it starts, before
+  anyone logs in. *Settings → Behaviour → Put the speeds I set back after a
+  reboot* switches that off; the speeds set since are still kept until the next
+  one.
+* **A curve** runs until it is stopped, across reboots.
+* **Appearance, icons and names** are yours alone, in
+  `~/.config/fan-control-kde/config.json`, and saved by *Apply* or *OK*.
+
+The last thing asked of a fan wins: setting a speed by hand stops that fan's
+curve, and applying a curve takes over from the speed set by hand.
+
+---
+
 ## How it works, and what it asks for
 
 Reading is unprivileged and constant. Everything that writes goes through a
 helper under `pkexec`, and there are **two** polkit actions, on purpose:
 
-`io.github.gabrielmf1998.fancontrol` — fans, curves, the two services. The
-shipped `49-fan-control-kde.rules` lets members of `wheel` through without a
-prompt, because the tray changes fan speeds constantly and a fan speed is worth
-nothing to an attacker who already has your session. Delete that file to be
-asked once per session instead.
+`io.github.gabrielmf1998.fancontrol` — fans, curves, the service. The shipped
+`49-fan-control-kde.rules` lets administrators — `wheel`, or `sudo` on Debian
+and Ubuntu — through without a prompt, from a local session, because the tray
+changes fan speeds constantly and a fan speed is worth nothing to an attacker
+who already has your session. Delete that file to be asked once in a while
+instead.
 
 `io.github.gabrielmf1998.fancontrol.install` — installing an update. A separate
 action on a separate binary, deliberately **not** in the rules file, and set to
@@ -347,9 +379,9 @@ download is checked against the release's `SHA256SUMS` before it gets that far.
 | Path | What is in it |
 | --- | --- |
 | `~/.config/fan-control-kde/config.json` | Appearance and behaviour |
-| `/etc/fan-control-kde/curves.json` | The curves |
-| `/etc/fan-control-kde/state.json` | Speeds to put back after a reboot |
-| `/run/fan-control-kde/status.json` | What the curve daemon is doing right now |
+| `/etc/fan-control-kde/curves.json` | The curves, and which of them run |
+| `/etc/fan-control-kde/state.json` | The speeds set by hand, and whether they come back after a reboot |
+| `/run/fan-control-kde/status.json` | What the service is doing right now |
 
 The helper is a plain command-line program and is worth knowing about:
 
@@ -359,6 +391,7 @@ The helper is a plain command-line program and is worth knowing about:
 sudo /usr/libexec/fan-control-helper set hwmon:nct6799:pwm2 60
 sudo /usr/libexec/fan-control-helper calibrate hwmon:nct6799:pwm2
 sudo /usr/libexec/fan-control-helper hwcurve hwmon:nct6799:pwm1
+journalctl -u fan-control-kde-daemon          # what the service has done
 ```
 
 ---
@@ -371,8 +404,14 @@ it, add `acpi_enforce_resources=lax` to the kernel command line.
 
 **A speed is accepted and nothing moves.** The write is read back, so this is
 reported rather than assumed. On an RDNA3 or RDNA4 Radeon it means the firmware
-wants its fan curve instead — draw one and write it in. On NVIDIA it means
-`Coolbits` is not set.
+wants its fan curve instead — draw one and write it in. On NVIDIA with a driver
+older than 520 it means `Coolbits` is not set.
+
+**A speed does not stay where it was set.** Something else is moving it — the
+firmware, a BIOS fan profile, another fan tool — and the service is putting it
+back. `journalctl -u fan-control-kde-daemon` says what it found each time. If
+the tray menu says *Background service is stopped*, start it from there; nothing
+keeps a speed or runs a curve while it is off.
 
 **A fan reads 0 rpm at every duty.** Either nothing is plugged into that header,
 or the fan has no sense wire. It can still be driven; it just cannot be measured,
@@ -399,8 +438,9 @@ the literal rpm and the strobing that comes with it.
 
 ```sh
 make check          # syntax
+make test           # the service against a fake sysfs, and the settings window
 make icons          # regenerate the icon and the documentation sheets
-make packages       # dist/: .rpm, .deb, .pkg.tar.zst, .AppImage, SHA256SUMS
+make packages       # dist/: .rpm, .deb (+ PySide6 .deb), .pkg.tar.zst, .AppImage, SHA256SUMS
 ```
 
 ---

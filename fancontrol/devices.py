@@ -67,6 +67,13 @@ class Snapshot:
     def runtime_for(self, dev_id: str) -> dict:
         return (self.runtime.get("fans") or {}).get(dev_id) or {}
 
+    def held_for(self, dev_id: str) -> dict:
+        """The service's word on a speed set by hand: what it is keeping, and
+        how many times something moved the fan off it."""
+        if self.units.get("curve_active") != "active":
+            return {}
+        return (self.runtime.get("held") or {}).get(dev_id) or {}
+
     def mode_of(self, dev: dict) -> str:
         if self.curve_active(dev["id"]):
             return "curve"

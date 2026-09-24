@@ -1,7 +1,8 @@
 // Fan speed is not a security-sensitive setting and the tray changes it
-// repeatedly, so members of wheel are not prompted for it. The action is bound
-// to a single helper binary that touches nothing but fan controls, the curve
-// file and its own two services.
+// repeatedly, so administrators are not prompted for it: wheel on Fedora and
+// Arch, sudo on Debian and Ubuntu, admin on the older Ubuntu releases. The
+// action is bound to a single helper binary that touches nothing but fan
+// controls, the curve file and its own service.
 //
 // Deliberately not listed here: io.github.gabrielmf1998.fancontrol.install,
 // which puts a package on the machine as root. That one asks every time, and
@@ -11,7 +12,10 @@
 // Delete this file if you would rather authenticate every time; the fan action
 // falls back to auth_admin_keep, which is one prompt per session.
 polkit.addRule(function(action, subject) {
-    if (action.id == "io.github.gabrielmf1998.fancontrol" && subject.isInGroup("wheel")) {
+    if (action.id == "io.github.gabrielmf1998.fancontrol" && subject.local &&
+        subject.active && (subject.isInGroup("wheel") ||
+                           subject.isInGroup("sudo") ||
+                           subject.isInGroup("admin"))) {
         return polkit.Result.YES;
     }
 });

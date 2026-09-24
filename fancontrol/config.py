@@ -55,7 +55,7 @@ MODES = [
     ("auto",   "Firmware / driver"),
     ("manual", "Set by hand"),
     ("curve",  "Fan curve"),
-    ("full",   "Uncontrolled (full speed)"),
+    ("full",   "Full speed"),
 ]
 
 MODE_COLORS = {

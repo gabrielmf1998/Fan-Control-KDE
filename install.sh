@@ -15,7 +15,8 @@ info() { printf '\033[1m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[1;33m==>\033[0m %s\n' "$*" >&2; }
 
 if [ "${1:-install}" = "uninstall" ]; then
-    info "stopping the services"
+    info "stopping the service"
+    $SUDO systemctl disable --now fan-control-kde-daemon.service 2>/dev/null || true
     $SUDO systemctl disable --now fan-control-kde-curve.service 2>/dev/null || true
     $SUDO systemctl disable --now fan-control-kde-restore.service 2>/dev/null || true
     $SUDO make uninstall
@@ -47,6 +48,11 @@ if [ -e /usr/libexec/fan-tray-helper ] || \
                 /usr/share/applications/fan-tray.desktop
     $SUDO systemctl daemon-reload
 fi
+
+# The one service that keeps the speeds you set and runs the curves. It also
+# folds a 2.3 install's two units into it, keeping what was switched on there.
+info "starting the background service"
+$SUDO /usr/libexec/fan-control-helper migrate || warn "the service did not start; see: systemctl status fan-control-kde-daemon"
 
 info "done. Start it with:  fan-control"
 info "to have it start at login, use Settings, or the menu's Start with the system"

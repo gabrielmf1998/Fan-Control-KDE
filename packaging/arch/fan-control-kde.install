@@ -1,0 +1,17 @@
+# pacman runs these around installing, upgrading and removing the package.
+
+post_install() {
+    # The one service that keeps the speeds you set and runs the curves. On an
+    # upgrade from 2.3 this also folds its two units into it, keeping what was
+    # switched on there, and restarts it so the new code is what runs.
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    /usr/libexec/fan-control-helper migrate || true
+}
+
+post_upgrade() {
+    post_install
+}
+
+pre_remove() {
+    systemctl disable --now fan-control-kde-daemon.service >/dev/null 2>&1 || true
+}

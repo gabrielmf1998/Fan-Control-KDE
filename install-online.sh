@@ -23,9 +23,10 @@ fam=""
 [ -r /etc/os-release ] && . /etc/os-release
 for t in "${ID:-}" ${ID_LIKE:-}; do
     case "$t" in
-        fedora|rhel|centos|rocky|almalinux|nobara) fam=rpm; break ;;
-        debian|ubuntu|linuxmint|pop)               fam=deb; break ;;
-        arch|manjaro|endeavouros|cachyos)          fam=arch; break ;;
+        fedora|rhel|centos|rocky|almalinux|nobara)  fam=rpm; break ;;
+        opensuse*|suse|sles)                        fam=suse; break ;;
+        debian|ubuntu|linuxmint|pop|neon)           fam=deb; break ;;
+        arch|manjaro|endeavouros|cachyos|garuda)    fam=arch; break ;;
     esac
 done
 
@@ -34,20 +35,34 @@ SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
 
 # ── PySide6 first ───────────────────────────────────────────
 # The tray is a Qt program. Without PySide6 the package installs and then does
-# nothing at all, which is a worse outcome than saying so now.
+# nothing at all, which is a worse outcome than saying so now. Ubuntu 24.04 and
+# what is built on it (Kubuntu, KDE neon, Linux Mint 22, Pop!_OS 24.04) and
+# Debian 12 package none; there the tray brings its own, as a second package.
+BUNDLED_PYSIDE6=""
 install_pyside() {
-    if python3 -c "import PySide6.QtWidgets" 2>/dev/null; then
+    if python3 -c "import PySide6.QtWidgets, PySide6.QtNetwork" 2>/dev/null; then
         info "PySide6 is already here"
         return
     fi
-    info "installing PySide6"
     case "$fam" in
-        rpm)  $SUDO dnf install -y python3-pyside6 ;;
-        deb)  $SUDO apt-get update -qq || true
-              $SUDO apt-get install -y python3-pyside6.qtwidgets \
-                                       python3-pyside6.qtnetwork ;;
-        arch) $SUDO pacman -S --needed --noconfirm pyside6 ;;
-        *)    warn "unknown distribution — install PySide6 yourself" ;;
+        rpm)  info "installing PySide6"
+              $SUDO dnf install -y python3-pyside6 ;;
+        suse) info "installing PySide6"
+              $SUDO zypper --non-interactive install python3-pyside6 ;;
+        deb)  $SUDO apt-get update -qq >/dev/null 2>&1 || true
+              if apt-cache show python3-pyside6.qtwidgets >/dev/null 2>&1; then
+                  info "installing PySide6"
+                  $SUDO apt-get install -y python3-pyside6.qtwidgets \
+                                           python3-pyside6.qtnetwork
+              else
+                  [ "$(dpkg --print-architecture)" = amd64 ] \
+                      || err "${PRETTY_NAME:-this distribution} packages no PySide6, and the copy the tray can bring along is for x86-64 only. Nothing was installed."
+                  BUNDLED_PYSIDE6=1
+                  info "${PRETTY_NAME:-this distribution} packages no PySide6; the tray brings its own (fan-control-kde-pyside6)"
+              fi ;;
+        arch) info "installing PySide6"
+              $SUDO pacman -S --needed --noconfirm pyside6 ;;
+        *)    info "the AppImage brings its own PySide6" ;;
     esac
 }
 
@@ -106,11 +121,20 @@ case "$fam" in
         pkg="$(fetch .noarch.rpm)"; verify "$pkg"
         info "installing with dnf"
         $SUDO dnf install -y "$pkg" ;;
+    suse)
+        pkg="$(fetch .noarch.rpm)"; verify "$pkg"
+        info "installing with zypper"
+        $SUDO zypper --non-interactive install --allow-unsigned-rpm "$pkg" ;;
     deb)
         pkg="$(fetch _all.deb)"; verify "$pkg"
+        set -- "$pkg"
+        if [ -n "$BUNDLED_PYSIDE6" ]; then
+            runtime="$(fetch _amd64.deb)"; verify "$runtime"
+            set -- "$pkg" "$runtime"
+        fi
         info "installing with apt"
-        $SUDO apt-get install -y "$pkg" \
-            || { $SUDO dpkg -i "$pkg"; $SUDO apt-get -f install -y; } ;;
+        $SUDO apt-get install -y "$@" \
+            || { $SUDO dpkg -i "$@"; $SUDO apt-get -f install -y; } ;;
     arch)
         pkg="$(fetch .pkg.tar.zst)"; verify "$pkg"
         info "installing with pacman"
@@ -130,10 +154,16 @@ Icon=sensors
 Terminal=false
 Categories=System;Monitor;Settings;
 DESKTOP
-        warn "the AppImage cannot ship the privileged helper — pkexec only runs"
-        warn "a real file on disk that a polkit policy names — so it can neither"
-        warn "read nor change anything on its own. Install the package for your"
+        warn "the AppImage cannot ship the privileged helper - pkexec only runs"
+        warn "a real file on disk that a polkit policy names - so it can watch"
+        warn "the fans but not change them. Install the package for your"
         warn "distribution, or run install.sh from the repository." ;;
+esac
+
+case "$fam" in
+    rpm|suse|deb|arch)
+        command -v fan-control >/dev/null 2>&1 \
+            || err "the package manager finished, but fan-control is not installed" ;;
 esac
 
 info "done — run it with:  fan-control"

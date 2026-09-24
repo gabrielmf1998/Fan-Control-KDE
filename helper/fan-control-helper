@@ -2,29 +2,32 @@
 """Root helper for Fan Control KDE.
 
 Finds every fan controller the machine will admit to having, drives whichever
-backend each one needs, and runs the curve daemon. Nothing about the hardware
-is assumed: capabilities are probed, writes are read back, and a device that
-cannot be driven is reported as monitor-only with the reason rather than being
-hidden, so the user can see it exists and why it will not move.
+backend each one needs, and runs the daemon that keeps them there. Nothing
+about the hardware is assumed: capabilities are probed, writes are read back,
+and a device that cannot be driven is reported as monitor-only with the reason
+rather than being hidden, so the user can see it exists and why it will not
+move.
 
 Commands
     status                       everything, as JSON
     sensors                      temperature sources only, as JSON
-    set <id> <0-100|auto|full>   drive one fan
+    set <id> <0-100|auto|full>   drive one fan, and keep it there
     curve show                   the stored curves
     curve set                    replace them, JSON on stdin
     curve enable <id> <on|off>   turn one curve on or off
     hwcurve <id> [reset]         push a curve into the firmware, or undo that
     calibrate <id>               sweep the fan and report what it actually does
-    daemon                       run the curve loop (this is the service)
+    daemon                       run the service loop (this is the service)
     daemon <on|off|status>       enable, disable or query that service
-    boot <on|off|status>         re-apply saved speeds at boot
-    restore                      re-apply them now
+    boot <on|off|status>         put the saved speeds back when it starts
+    restore                      put them back now
+    migrate                      carry an older install over (for packaging)
     version
 
 Only `status`, `sensors`, `curve show` and the three `*/status` queries are
 meant to run unprivileged; everything else needs root and says so.
 """
+import ctypes
 import errno
 import glob
 import json
@@ -35,7 +38,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "2.3.1"
+VERSION = "2.4.0"
 
 STATE_DIR = "/etc/fan-control-kde"
 STATE = os.path.join(STATE_DIR, "state.json")
@@ -46,9 +49,17 @@ CURVES = os.path.join(STATE_DIR, "curves.json")
 HWBACKUP = os.path.join(STATE_DIR, "firmware-curves.json")
 RUN_DIR = "/run/fan-control-kde"
 RUN_STATUS = os.path.join(RUN_DIR, "status.json")
+# One file per fan being calibrated; the daemon keeps its hands off those.
+CALIBRATING_DIR = os.path.join(RUN_DIR, "calibrating")
 
-BOOT_UNIT = "fan-control-kde-restore.service"
-CURVE_UNIT = "fan-control-kde-curve.service"
+# One service keeps the speeds that were set, puts them back after a reboot and
+# runs the curves. Up to 2.3 that was two units - a one-shot restore at boot and
+# a curve loop - and a speed written once at boot was a speed the firmware could
+# quietly take back a few seconds later, with nothing left running to notice.
+DAEMON_UNIT = "fan-control-kde-daemon.service"
+OLD_UNITS = ("fan-control-kde-curve.service", "fan-control-kde-restore.service",
+             "fan-tray-restore.service")
+SYSTEMD_ETC = "/etc/systemd/system"
 
 SYSFS_HWMON = "/sys/class/hwmon"
 SYSFS_DRM = "/sys/class/drm"
@@ -59,6 +70,8 @@ EMERGENCY_TEMP = 95.0
 # What a curve falls back to when its temperature source stops answering.
 # Deliberately loud: a silent fallback would be a silent overheat.
 FALLBACK_PERCENT = 70
+# How often the daemon looks at a fan it is holding at a set speed.
+HOLD_CHECK_S = 2.0
 
 
 # --------------------------------------------------------------------------
@@ -96,16 +109,21 @@ def write_raw(path, value):
         return exc.strerror or str(exc)
 
 
-def write_verified(path, value, settle=0.0):
+def write_verified(path, value, settle=0.0, tolerance=0):
     """Write, then read back. A driver that quietly ignores a value is the
-    normal failure here, not an exception: amdgpu and nvidia both do it."""
+    normal failure here, not an exception: amdgpu and nvidia both do it.
+
+    `tolerance` is for duty registers that do not read back exactly what was
+    written - amdgpu reports the duty the fan controller is actually putting
+    out, and older it87 chips keep seven bits of eight. Calling those a failure
+    meant a speed that was applied was never saved."""
     err = write_raw(path, value)
     if err:
         return err
     if settle:
         time.sleep(settle)
     got = read_int(path)
-    if got is not None and int(got) != int(value):
+    if got is not None and abs(int(got) - int(value)) > tolerance:
         return "the driver kept %s instead of %s" % (got, value)
     return None
 
@@ -239,15 +257,141 @@ def sensor_value(sensors, sid):
 # --------------------------------------------------------------------------
 # NVIDIA
 # --------------------------------------------------------------------------
+class Nvml:
+    """libnvidia-ml, the library nvidia-smi is built on, through ctypes.
+
+    Unlike nvidia-settings it needs no X display and no Coolbits: it works on a
+    Wayland session, before anyone has logged in, and from a system service -
+    which is exactly where a speed has to be put back after a reboot. Reading
+    works as any user; setting a fan needs root. Nothing here raises: a call the
+    installed driver does not have comes back as None, and the caller falls
+    back to nvidia-settings.
+    """
+
+    SUCCESS = 0
+    NOT_SUPPORTED = 3
+    FUNCTION_NOT_FOUND = 13
+    # nvmlFanControlPolicy_t
+    POLICY_AUTO = 0
+    POLICY_MANUAL = 1
+
+    _lib = None
+    _state = None                     # None: not tried yet
+
+    class FanSpeedInfo(ctypes.Structure):
+        _fields_ = [("version", ctypes.c_uint), ("fan", ctypes.c_uint),
+                    ("speed", ctypes.c_uint)]
+
+    class Utilization(ctypes.Structure):
+        _fields_ = [("gpu", ctypes.c_uint), ("memory", ctypes.c_uint)]
+
+    @classmethod
+    def ready(cls):
+        if cls._state is None:
+            cls._state = False
+            try:
+                lib = ctypes.CDLL("libnvidia-ml.so.1")
+                if lib.nvmlInit_v2() == cls.SUCCESS:
+                    cls._lib = lib
+                    cls._state = True
+            except (OSError, AttributeError):
+                pass
+        return cls._state
+
+    @classmethod
+    def rc(cls, name, *args):
+        """The return code, or None when this driver has no such call."""
+        if not cls.ready():
+            return None
+        fn = getattr(cls._lib, name, None)
+        if fn is None:
+            return None
+        try:
+            return int(fn(*args))
+        except (ctypes.ArgumentError, OSError):
+            return None
+
+    @classmethod
+    def error(cls, code):
+        fn = getattr(cls._lib, "nvmlErrorString", None) if cls._lib else None
+        if fn is None or code is None:
+            return "NVML error %s" % code
+        fn.restype = ctypes.c_char_p
+        return (fn(code) or b"").decode(errors="replace") or "NVML error %s" % code
+
+    @classmethod
+    def handle(cls, index):
+        h = ctypes.c_void_p()
+        ok = cls.rc("nvmlDeviceGetHandleByIndex_v2", ctypes.c_uint(index),
+                    ctypes.byref(h)) == cls.SUCCESS
+        return h if ok else None
+
+    @classmethod
+    def uint(cls, name, *args):
+        out = ctypes.c_uint()
+        ok = cls.rc(name, *args, ctypes.byref(out)) == cls.SUCCESS
+        return out.value if ok else None
+
+    @classmethod
+    def count(cls):
+        return cls.uint("nvmlDeviceGetCount_v2") or 0
+
+    @classmethod
+    def name(cls, h):
+        buf = ctypes.create_string_buffer(96)
+        if cls.rc("nvmlDeviceGetName", h, buf, ctypes.c_uint(96)) != cls.SUCCESS:
+            return ""
+        return buf.value.decode(errors="replace").strip()
+
+    @classmethod
+    def fans(cls, h):
+        return cls.uint("nvmlDeviceGetNumFans", h) or 0
+
+    @classmethod
+    def rpm(cls, h, fan):
+        info = cls.FanSpeedInfo()
+        # NVML_STRUCT_VERSION(FanSpeedInfo, 1)
+        info.version = ctypes.sizeof(cls.FanSpeedInfo) | (1 << 24)
+        info.fan = fan
+        if cls.rc("nvmlDeviceGetFanSpeedRPM", h, ctypes.byref(info)) != cls.SUCCESS:
+            return None
+        return info.speed
+
+    @classmethod
+    def utilization(cls, h):
+        util = cls.Utilization()
+        if cls.rc("nvmlDeviceGetUtilizationRates", h, ctypes.byref(util)) != cls.SUCCESS:
+            return None
+        return util.gpu
+
+
 _NVIDIA_CACHE = {"time": 0.0, "gpus": []}
 
 
 def nvidia_gpus(max_age=2.0):
-    """One nvidia-smi call, cached: discovery and the sensor list both want it."""
+    """Every NVIDIA card, cached: discovery and the sensor list both want it.
+
+    From NVML where the driver has it, which costs nothing; nvidia-smi is the
+    fallback for a driver too old for that."""
     now = time.monotonic()
     if now - _NVIDIA_CACHE["time"] < max_age:
         return _NVIDIA_CACHE["gpus"]
     gpus = []
+    for index in range(Nvml.count()):
+        h = Nvml.handle(index)
+        if h is None:
+            continue
+        gpus.append({
+            "index": index,
+            "name": Nvml.name(h) or "NVIDIA GPU %d" % index,
+            "fan": Nvml.uint("nvmlDeviceGetFanSpeed_v2", h, ctypes.c_uint(0)),
+            # NVML_TEMPERATURE_GPU
+            "temp": Nvml.uint("nvmlDeviceGetTemperature", h, ctypes.c_uint(0)),
+            "util": Nvml.utilization(h) or 0,
+        })
+    if gpus:
+        _NVIDIA_CACHE.update(time=now, gpus=gpus)
+        return gpus
     res = run(["nvidia-smi",
                "--query-gpu=index,name,fan.speed,temperature.gpu,utilization.gpu",
                "--format=csv,noheader,nounits"], timeout=8)
@@ -293,12 +437,21 @@ class Backend:
     kind = "unknown"
     control = False
     hw_curve = False
+    # Seconds between checks that a held speed is still there. Reading a sysfs
+    # file costs nothing; a backend that has to start a program to find out
+    # asks for longer.
+    check_every = HOLD_CHECK_S
 
     def status(self):
         return {}
 
     def set(self, value):
         return False, "this device cannot be controlled"
+
+    def matches(self, value):
+        """Whether the fan is still doing what `value` asked of it. True when
+        there is no way to tell, so nothing gets rewritten on a guess."""
+        return True
 
     def features(self):
         return {}
@@ -345,6 +498,8 @@ class HwmonChannel(Backend):
 
     kind = "hwmon"
     control = True
+    # Raw pwm units a read-back may be off by and still be what was written.
+    tolerance = 2
 
     def __init__(self, path, channel, chip):
         self.path = path
@@ -446,8 +601,30 @@ class HwmonChannel(Backend):
         err = write_verified(en, self.q["manual"], settle=0.05)
         if err:
             return False, err
-        err = write_verified(pw, pct_to_raw(pct, lo, hi))
+        err = write_verified(pw, pct_to_raw(pct, lo, hi), tolerance=self.tolerance)
         return (False, err) if err else (True, None)
+
+    def matches(self, value):
+        mode = self.mode()
+        if mode == "unknown":
+            return False
+        if value == "auto":
+            return mode in ("auto", "hwcurve")
+        if value == "full":
+            value = "100"
+        try:
+            pct = max(0, min(100, int(value)))
+        except (TypeError, ValueError):
+            return True
+        if pct >= 100 and mode == "full":
+            return True
+        if mode not in ("manual", "full"):
+            return False
+        raw = read_int(self.f("pwm%d"))
+        if raw is None:
+            return False
+        lo, hi = self.bounds()
+        return abs(raw - pct_to_raw(pct, lo, hi)) <= self.tolerance
 
     # ---- the chip's own curve ------------------------------------------
     def read_hw_curve(self):
@@ -582,6 +759,8 @@ class AmdGpu(HwmonChannel):
     """
 
     kind = "amdgpu"
+    # pwm1 reads back the duty the SMU is putting out, not the one written.
+    tolerance = 8
 
     def __init__(self, path, channel, chip, od_dir=None):
         super().__init__(path, channel, chip)
@@ -703,8 +882,9 @@ class AmdGpu(HwmonChannel):
 
 
 class NvidiaGpu(Backend):
-    """NVIDIA exposes no hwmon, so everything goes through nvidia-settings,
-    which needs an X or XWayland display and Coolbits in the X configuration."""
+    """NVIDIA exposes no hwmon. NVML drives the fans where the driver has the
+    calls for it (520 and newer); nvidia-settings is the fallback, and that one
+    needs an X or XWayland display and Coolbits in the X configuration."""
 
     kind = "nvidia"
     control = True
@@ -712,13 +892,66 @@ class NvidiaGpu(Backend):
     def __init__(self, index=0, name=""):
         self.index = index
         self.name = name
+        self.h = Nvml.handle(index)
+        if self.h is None:
+            # Every check would start nvidia-settings twice.
+            self.check_every = 15.0
 
+    # ---- NVML ------------------------------------------------------------
+    def _nvml_fans(self):
+        return Nvml.fans(self.h) if self.h is not None else 0
+
+    def _nvml_bounds(self):
+        lo, hi = ctypes.c_uint(), ctypes.c_uint()
+        if Nvml.rc("nvmlDeviceGetMinMaxFanSpeed", self.h, ctypes.byref(lo),
+                   ctypes.byref(hi)) == Nvml.SUCCESS and hi.value > lo.value:
+            return lo.value, hi.value
+        return None
+
+    def _nvml_set(self, value):
+        """(ok, note), or None when NVML cannot do it and nvidia-settings
+        should be tried instead."""
+        fans = self._nvml_fans()
+        if not fans or os.geteuid() != 0:
+            return None
+        if value == "auto":
+            for fan in range(fans):
+                code = Nvml.rc("nvmlDeviceSetDefaultFanSpeed_v2", self.h,
+                               ctypes.c_uint(fan))
+                if code in (None, Nvml.NOT_SUPPORTED, Nvml.FUNCTION_NOT_FOUND):
+                    return None
+                if code != Nvml.SUCCESS:
+                    return False, Nvml.error(code)
+            return True, None
+        if value == "full":
+            value = "100"
+        try:
+            want = int(value)
+        except (TypeError, ValueError):
+            return False, "not a percentage: %s" % value
+        lo, hi = self.bounds()
+        pct = max(lo, min(hi, want))
+        for fan in range(fans):
+            code = Nvml.rc("nvmlDeviceSetFanSpeed_v2", self.h, ctypes.c_uint(fan),
+                           ctypes.c_uint(pct))
+            if code in (None, Nvml.NOT_SUPPORTED, Nvml.FUNCTION_NOT_FOUND):
+                return None
+            if code != Nvml.SUCCESS:
+                return False, Nvml.error(code)
+        got = Nvml.uint("nvmlDeviceGetTargetFanSpeed", self.h, ctypes.c_uint(0))
+        if got is not None and abs(got - pct) > 1:
+            return False, "the driver kept %d%% (asked for %d%%)" % (got, pct)
+        if pct != want:
+            return True, "clamped to %d%%: this GPU accepts %d-%d%%" % (pct, lo, hi)
+        return True, None
+
+    # ---- nvidia-settings --------------------------------------------------
     def _q(self, attr):
         return nvidia_settings(["-q", attr])
 
-    def bounds(self):
-        """Ask the driver for its own limits. GeForce cards refuse anything
-        under about 30%, and nvidia-settings exits 0 even when it refuses."""
+    def _xs_bounds(self):
+        """GeForce cards refuse anything under about 30%, and nvidia-settings
+        exits 0 even when it refuses."""
         r = self._q("[fan:0]/GPUTargetFanSpeed")
         if r and r.returncode == 0:
             m = re.search(r"range\s+(\d+)\s*-\s*(\d+)", r.stdout)
@@ -735,6 +968,8 @@ class NvidiaGpu(Backend):
         return None
 
     def fan_count(self):
+        if self.h is not None:
+            return max(1, self._nvml_fans())
         r = self._q("[gpu:%d]/GPUFanCount" % self.index)
         if r and r.returncode == 0:
             m = re.search(r":\s*(\d+)", r.stdout)
@@ -744,6 +979,12 @@ class NvidiaGpu(Backend):
 
     def rpms(self):
         out = []
+        if self.h is not None:
+            for fan in range(self._nvml_fans()):
+                rpm = Nvml.rpm(self.h, fan)
+                if rpm:
+                    out.append(rpm)
+            return out
         for fan in range(self.fan_count()):
             q = self._q("[fan:%d]/GPUCurrentFanSpeedRPM" % fan)
             if not q or q.returncode != 0:
@@ -756,7 +997,31 @@ class NvidiaGpu(Backend):
                     break
         return out
 
+    # ---- the backend -------------------------------------------------------
+    def bounds(self):
+        if self.h is not None:
+            nvml = self._nvml_bounds()
+            if nvml:
+                return nvml
+        return self._xs_bounds()
+
     def status(self):
+        if self.h is not None and self._nvml_fans():
+            fans = range(self._nvml_fans())
+            policies = [Nvml.uint("nvmlDeviceGetFanControlPolicy_v2", self.h,
+                                  ctypes.c_uint(f)) for f in fans]
+            target = Nvml.uint("nvmlDeviceGetTargetFanSpeed", self.h, ctypes.c_uint(0))
+            if target is None:
+                target = Nvml.uint("nvmlDeviceGetFanSpeed_v2", self.h, ctypes.c_uint(0))
+            return {
+                "rpms": self.rpms(),
+                "percent": target or 0,
+                "temp": Nvml.uint("nvmlDeviceGetTemperature", self.h, ctypes.c_uint(0)),
+                "util": Nvml.utilization(self.h),
+                "mode": ("manual" if Nvml.POLICY_MANUAL in policies else "auto"),
+                "range": list(self.bounds()),
+                "reason": "",
+            }
         gpu = next((g for g in nvidia_gpus() if g["index"] == self.index), None)
         if gpu is None:
             return {"rpms": [], "percent": 0, "mode": "auto", "range": [30, 100],
@@ -780,9 +1045,51 @@ class NvidiaGpu(Backend):
 
     def features(self):
         return {"hw_curve": False, "fans": self.fan_count(),
-                "needs_display": True}
+                "needs_display": self.h is None, "nvml": self.h is not None}
+
+    def matches(self, value):
+        if value == "full":
+            value = "100"
+        if self.h is not None and self._nvml_fans():
+            fans = range(self._nvml_fans())
+            policies = [Nvml.uint("nvmlDeviceGetFanControlPolicy_v2", self.h,
+                                  ctypes.c_uint(f)) for f in fans]
+            if None in policies:
+                return True
+            if value == "auto":
+                return all(p == Nvml.POLICY_AUTO for p in policies)
+            try:
+                lo, hi = self.bounds()
+                pct = max(lo, min(hi, int(value)))
+            except (TypeError, ValueError):
+                return True
+            if any(p != Nvml.POLICY_MANUAL for p in policies):
+                return False
+            for fan in fans:
+                got = Nvml.uint("nvmlDeviceGetTargetFanSpeed", self.h, ctypes.c_uint(fan))
+                if got is not None and abs(got - pct) > 1:
+                    return False
+            return True
+        r = self._q("[gpu:%d]/GPUFanControlState" % self.index)
+        if r is None or r.returncode != 0:
+            return True                   # no display yet: cannot tell
+        manual = ": 1." in r.stdout
+        if value == "auto":
+            return not manual
+        if not manual:
+            return False
+        got = self.target()
+        try:
+            lo, hi = self._xs_bounds()
+            return got is None or abs(got - max(lo, min(hi, int(value)))) <= 1
+        except (TypeError, ValueError):
+            return True
 
     def set(self, value):
+        if self.h is not None:
+            done = self._nvml_set(value)
+            if done is not None:
+                return done
         if value == "auto":
             r = nvidia_settings(["-a", "[gpu:%d]/GPUFanControlState=0" % self.index])
             ok = r is not None and r.returncode == 0
@@ -795,7 +1102,7 @@ class NvidiaGpu(Backend):
         except (TypeError, ValueError):
             return False, "not a percentage: %s" % value
 
-        lo, hi = self.bounds()
+        lo, hi = self._xs_bounds()
         pct = max(lo, min(hi, want))
         r = nvidia_settings(["-a", "[gpu:%d]/GPUFanControlState=1" % self.index])
         if r is None or r.returncode != 0:
@@ -917,10 +1224,9 @@ def discover():
             continue
         driver = os.path.basename(os.path.realpath(os.path.join(dev, "driver")))
         slot = os.path.basename(dev)
-        label = pci_name(slot.replace("0000:", "")) or driver
 
         if driver == "nvidia":
-            continue                                  # handled from nvidia-smi
+            continue                                  # handled through NVML
 
         hw = hwmon_of(dev)
         if not hw:
@@ -930,6 +1236,10 @@ def discover():
                           if re.search(r"pwm\d+$", p))
         has_tach = bool(glob.glob(os.path.join(hw, "fan[0-9]*_input")))
         od = gpu_od_dir(dev)
+        if not (channels or has_tach or od):
+            continue                                  # an iGPU: no fan at all
+        # Only now: lspci is a process per card, and this runs on every poll.
+        label = pci_name(slot.replace("0000:", "")) or driver
 
         if channels:
             chip = hwmon_name(hw)
@@ -1083,12 +1393,32 @@ def curve_for(store, dev_id):
     return c
 
 
+def write_json(path, data):
+    """Atomically, so a power cut mid-write leaves the old file rather than half
+    of a new one. (None, or the reason it failed.)"""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(data, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except OSError as exc:
+        return exc.strerror or str(exc)
+    return None
+
+
 def curves_save(data):
     if os.geteuid() != 0:
         return False, "needs root"
-    clean = {"version": 1,
-             "interval_ms": int(max(200, min(10000, data.get("interval_ms", 1000)))),
-             "curves": {}}
+    try:
+        interval = int(max(200, min(10000, float(data.get("interval_ms", 1000)))))
+    except (TypeError, ValueError):
+        interval = 1000
+    clean = {"version": 1, "interval_ms": interval, "curves": {}}
     for dev_id, raw in (data.get("curves") or {}).items():
         if not isinstance(raw, dict):
             continue
@@ -1097,7 +1427,7 @@ def curves_save(data):
             if key in raw:
                 c[key] = raw[key]
         points = []
-        for pair in c["points"]:
+        for pair in c["points"] if isinstance(c["points"], list) else []:
             try:
                 t, v = float(pair[0]), float(pair[1])
             except (TypeError, ValueError, IndexError):
@@ -1106,42 +1436,48 @@ def curves_save(data):
         if len(points) < 2:
             return False, "%s: a curve needs at least two points" % dev_id
         c["points"] = sorted(points)
-        c["enabled"] = bool(c["enabled"])
-        c["min_percent"] = int(max(0, min(100, c["min_percent"])))
-        c["max_percent"] = int(max(c["min_percent"], min(100, c["max_percent"])))
-        c["hysteresis"] = float(max(0.0, min(20.0, c["hysteresis"])))
-        c["spinup_percent"] = int(max(0, min(100, c["spinup_percent"])))
-        c["spinup_ms"] = int(max(0, min(5000, c["spinup_ms"])))
-        c["zero_below"] = int(max(0, min(90, c["zero_below"])))
-        c["ramp_up"] = float(max(1.0, min(100.0, c["ramp_up"])))
-        c["ramp_down"] = float(max(1.0, min(100.0, c["ramp_down"])))
+        try:
+            c["enabled"] = bool(c["enabled"])
+            c["source"] = str(c["source"] or "")
+            c["min_percent"] = int(max(0, min(100, float(c["min_percent"]))))
+            c["max_percent"] = int(max(c["min_percent"], min(100, float(c["max_percent"]))))
+            c["hysteresis"] = float(max(0.0, min(20.0, float(c["hysteresis"]))))
+            c["spinup_percent"] = int(max(0, min(100, float(c["spinup_percent"]))))
+            c["spinup_ms"] = int(max(0, min(5000, float(c["spinup_ms"]))))
+            c["zero_below"] = int(max(0, min(90, float(c["zero_below"]))))
+            c["ramp_up"] = float(max(1.0, min(100.0, float(c["ramp_up"]))))
+            c["ramp_down"] = float(max(1.0, min(100.0, float(c["ramp_down"]))))
+        except (TypeError, ValueError):
+            return False, "%s: something in that curve is not a number" % dev_id
         clean["curves"][dev_id] = c
-    try:
-        os.makedirs(STATE_DIR, exist_ok=True)
-        tmp = CURVES + ".tmp"
-        with open(tmp, "w") as fh:
-            json.dump(clean, fh, indent=2, sort_keys=True)
-            fh.write("\n")
-        os.replace(tmp, CURVES)
-    except OSError as exc:
-        return False, exc.strerror or str(exc)
-    return True, None
+    err = write_json(CURVES, clean)
+    return (False, err) if err else (True, None)
 
 
 # --------------------------------------------------------------------------
-# the curve daemon
+# the daemon
 # --------------------------------------------------------------------------
 class CurveRunner:
-    """One fan under one curve: hysteresis, ramping, spin-up and a floor."""
+    """One fan under one curve: hysteresis, ramping, spin-up and a floor.
 
-    def __init__(self, dev, curve, source):
+    The level being ramped is kept as a float and only rounded on its way to
+    the fan. Rounding it in place meant a step under half a percent - a slow
+    ramp checked often - rounded straight back to where it started, and the fan
+    never got to where the curve was sending it.
+    """
+
+    def __init__(self, dev, curve, source, interval=1.0, start=None):
         self.dev = dev
         self.curve = curve
         self.source = source
+        self.interval = interval
         self.applied_temp = None
-        self.applied_pct = None
+        # Where the fan is when the curve takes it, so the first move is a
+        # ramp from there rather than a jump, and a fan that is already turning
+        # does not get kicked as if it were standing still.
+        self.level = start
+        self.written = None
         self.spinup_until = 0.0
-        self.last = {}
 
     def target(self, temp, now):
         c = self.curve
@@ -1159,130 +1495,322 @@ class CurveRunner:
             want = max(c["min_percent"], min(c["max_percent"], want))
 
         if temp >= EMERGENCY_TEMP:
+            self.level = 100.0
             return 100.0, "emergency"
 
+        if self.level is None:
+            self.level = want
         # a fan that is stopped needs a shove before it will take a low duty
-        if want > 0 and (self.applied_pct or 0) <= 0 and c["spinup_percent"] > 0:
-            if now >= self.spinup_until:
-                self.spinup_until = now + c["spinup_ms"] / 1000.0
-            return max(want, c["spinup_percent"]), "spin-up"
+        if want > 0 and self.level <= 0 and c["spinup_percent"] > 0:
+            self.spinup_until = now + c["spinup_ms"] / 1000.0
         if now < self.spinup_until:
-            return max(want, c["spinup_percent"]), "spin-up"
+            self.level = max(want, float(c["spinup_percent"]))
+            return self.level, "spin-up"
 
         # ramp: limit how far it may move in one interval
-        if self.applied_pct is not None:
-            limit = c["ramp_up"] if want > self.applied_pct else c["ramp_down"]
-            step = limit * self.interval
-            want = max(self.applied_pct - step, min(self.applied_pct + step, want))
-        return want, "curve"
-
-    interval = 1.0
+        limit = c["ramp_up"] if want > self.level else c["ramp_down"]
+        step = limit * self.interval
+        self.level = max(self.level - step, min(self.level + step, want))
+        return self.level, "curve"
 
 
-def daemon_loop():
-    if os.geteuid() != 0:
-        print("the curve daemon needs root", file=sys.stderr)
-        return 1
+def calibration_marker(dev_id):
+    return os.path.join(CALIBRATING_DIR, re.sub(r"[^A-Za-z0-9_.#:-]", "_", dev_id))
 
-    stop = {"now": False}
 
-    def _stop(_sig, _frame):
-        stop["now"] = True
+class Daemon:
+    """The one service: it keeps the speeds that were set, puts them back when
+    it starts, and runs the curves.
 
-    signal.signal(signal.SIGTERM, _stop)
-    signal.signal(signal.SIGINT, _stop)
+    A speed is not written once and trusted. On an ASRock B650 board the
+    headers went back to 30% a few seconds after every boot, long after the
+    old one-shot restore had finished and reported success, and firmware, a
+    driver or some other tool can do the same at any time. So every fan this
+    owns is looked at every couple of seconds and put back when it has moved,
+    and the journal says each time that happened.
+    """
 
-    try:
-        os.makedirs(RUN_DIR, exist_ok=True)
-        os.chmod(RUN_DIR, 0o755)
-    except OSError:
-        pass
+    def __init__(self):
+        self.quit = None
+        self.started = time.time()
+        self.devices = []
+        self.by_id = {}
+        self.store = {}
+        self.state = {}
+        self.interval = 1.0
+        self.runners = {}      # dev_id -> CurveRunner
+        self.held = {}         # dev_id -> the speed being kept
+        self.wanted = {}       # what the last reload asked for, "auto" included
+        self.initial = None    # the saved speeds as they were at start
+        self.restore = True    # whether those came back at start
+        self.put_back = {}     # dev_id -> how many times something moved it
+        self.touched = set()   # fans a curve has driven: handed back on exit
+        self.next_check = {}   # dev_id -> when to look at it again
+        self.next_look = 0.0   # when to look again for fans not found yet
+        self.stamps = None
 
-    store = curves_load()
-    interval = max(0.2, store.get("interval_ms", 1000) / 1000.0)
-    devices = discover()
-    by_id = {d["id"]: d for d in devices}
-    runners = {}
-    mtime = os.path.getmtime(CURVES) if os.path.exists(CURVES) else 0
-    touched = []
+    # ---- files and devices -------------------------------------------------
+    @staticmethod
+    def _stamp(path):
+        try:
+            st = os.stat(path)
+            return (st.st_mtime_ns, st.st_size, st.st_ino)
+        except OSError:
+            return None
 
-    def rebuild():
-        # Re-discovered as well as re-read: a GPU driver that loaded after this
-        # started would otherwise never be seen without restarting the service.
-        nonlocal store, interval, runners, devices, by_id
-        devices = discover()
-        by_id = {d["id"]: d for d in devices}
-        store = curves_load()
-        interval = max(0.2, store.get("interval_ms", 1000) / 1000.0)
-        sensors = discover_sensors()
-        runners = {}
-        for dev_id, raw in (store.get("curves") or {}).items():
-            curve = dict(CURVE_DEFAULTS)
-            curve.update(raw)
-            if not curve["enabled"]:
+    def files_changed(self):
+        stamps = (self._stamp(CURVES), self._stamp(STATE))
+        if stamps == self.stamps:
+            return False
+        self.stamps = stamps
+        return True
+
+    def discover(self):
+        self.devices = discover()
+        self.by_id = {d["id"]: d for d in self.devices}
+
+    def missing(self):
+        """Fans there are orders for that have not turned up. A GPU driver or a
+        Super I/O module can load after this starts; they get looked for."""
+        ids = set(self.wanted) | {i for i, c in (self.store.get("curves") or {}).items()
+                                  if isinstance(c, dict) and c.get("enabled")}
+        ids |= set((self.state.get("speeds") or {}))
+        return sorted(i for i in ids if i not in self.by_id)
+
+    def calibrating(self, dev_id):
+        try:
+            return time.time() - os.path.getmtime(calibration_marker(dev_id)) < 600
+        except OSError:
+            return False
+
+    def current_percent(self, dev_id):
+        try:
+            st = self.by_id[dev_id]["backend"].status()
+        except Exception:                               # noqa: BLE001
+            return None
+        if st.get("mode") == "full":
+            return 100.0
+        pct = st.get("percent")
+        return float(pct) if pct is not None else None
+
+    # ---- what to do ----------------------------------------------------------
+    def reload(self):
+        self.store = curves_load()
+        self.state = state_load()
+        try:
+            self.interval = max(0.2, float(self.store.get("interval_ms", 1000)) / 1000.0)
+        except (TypeError, ValueError):
+            self.interval = 1.0
+
+        # the curves that should be running
+        sensors = None
+        curves = {}
+        for dev_id, raw in (self.store.get("curves") or {}).items():
+            if not isinstance(raw, dict) or not raw.get("enabled"):
                 continue
-            dev = by_id.get(dev_id)
+            dev = self.by_id.get(dev_id)
             if not dev or not dev["backend"].control:
                 continue
-            source = curve["source"]
+            curve = dict(CURVE_DEFAULTS)
+            curve.update(raw)
+            source = curve.get("source") or ""
             if not source and dev.get("temp_hint"):
+                if sensors is None:
+                    sensors = discover_sensors()
                 try:
                     source = dev["temp_hint"](sensors)
                 except TypeError:
                     source = None
-            if not source:
+            if source:
+                curves[dev_id] = (curve, source)
+
+        stopped = [i for i in self.runners if i not in curves]
+        for dev_id in stopped:
+            del self.runners[dev_id]
+        for dev_id, (curve, source) in curves.items():
+            old = self.runners.get(dev_id)
+            if old and old.curve == curve and old.source == source:
+                old.interval = self.interval
                 continue
-            runner = CurveRunner(dev, curve, source)
-            runner.interval = interval
-            runners[dev_id] = runner
+            start = old.level if old else self.current_percent(dev_id)
+            self.runners[dev_id] = CurveRunner(self.by_id[dev_id], curve, source,
+                                               self.interval, start)
+            if old is None:
+                log("%s: running its curve, following %s" % (dev_id, source))
 
-    rebuild()
-    log("curve daemon started, %d curve(s) active" % len(runners))
+        # the speeds set by hand
+        speeds = self.state.get("speeds") or {}
+        set_at = self.state.get("set_at") or {}
+        entries = {i: (v, set_at.get(i)) for i, v in speeds.items()}
+        first = self.initial is None
+        if first:
+            self.initial = entries
+            self.restore = bool(self.state.get("restore_at_boot", True))
+        wanted = {}
+        for dev_id, (value, _when) in entries.items():
+            if dev_id in self.runners:
+                continue
+            # From before this start, and putting those back is switched off.
+            if not self.restore and entries[dev_id] == self.initial.get(dev_id):
+                continue
+            wanted[dev_id] = value
+        for dev_id, value in wanted.items():
+            if first or self.wanted.get(dev_id) != value:
+                self.apply(dev_id, value, "put back" if first else "set")
+        # A curve that was switched off and left nothing set by hand behind it
+        # hands its fan back to the firmware, rather than leaving it wherever
+        # the curve last had it.
+        for dev_id in stopped:
+            if dev_id not in wanted and dev_id in self.touched:
+                self.apply(dev_id, "auto", "its curve was switched off")
+            self.touched.discard(dev_id)
+        self.wanted = wanted
+        self.held = {i: v for i, v in wanted.items() if v != "auto"}
 
-    while not stop["now"]:
-        try:
-            now = os.path.getmtime(CURVES) if os.path.exists(CURVES) else 0
-            if now != mtime:
-                mtime = now
-                rebuild()
-                log("curves reloaded, %d active" % len(runners))
+    def apply(self, dev_id, value, why):
+        dev = self.by_id.get(dev_id)
+        if dev is None or self.calibrating(dev_id):
+            return
+        backend = dev["backend"]
+        self.next_check[dev_id] = time.monotonic() + backend.check_every
+        if backend.matches(value):
+            return
+        ok, note = backend.set(value)
+        if ok:
+            log("%s -> %s (%s)%s" % (dev_id, value, why, "; " + note if note else ""))
+        else:
+            log("%s -> %s (%s) FAILED: %s" % (dev_id, value, why, note))
 
-            sensors = discover_sensors()
-            report = {"time": time.time(), "fans": {}}
-            for dev_id, runner in runners.items():
-                temp = sensor_value(sensors, runner.source)
-                if temp is None:
-                    pct, why = FALLBACK_PERCENT, "no sensor"
+    def keep(self, now, report):
+        """Put back whatever has been moved off the speed it was set to."""
+        for dev_id, value in self.held.items():
+            dev = self.by_id.get(dev_id)
+            if dev is None:
+                continue
+            info = {"value": value, "put_back": self.put_back.get(dev_id, 0),
+                    "label": dev["label"]}
+            report["held"][dev_id] = info
+            if self.calibrating(dev_id) or now < self.next_check.get(dev_id, 0.0):
+                continue
+            backend = dev["backend"]
+            self.next_check[dev_id] = now + backend.check_every
+            if backend.matches(value):
+                continue
+            st = backend.status()
+            was = "%s at %s%%" % (st.get("mode", "?"), st.get("percent", "?"))
+            count = self.put_back.get(dev_id, 0) + 1
+            self.put_back[dev_id] = info["put_back"] = count
+            ok, note = backend.set(value)
+            if count <= 5 or count % 100 == 0:
+                log("%s had been moved off %s (it was %s); %s%s" % (
+                    dev_id, value, was,
+                    "put it back" if ok else "could not put it back: %s" % note,
+                    "" if count == 1 else " - %d times so far" % count))
+
+    def tick_curves(self, now, sensors, report):
+        for dev_id, runner in self.runners.items():
+            if self.calibrating(dev_id):
+                report["fans"][dev_id] = {"percent": runner.written, "temp": None,
+                                          "source": runner.source, "why": "calibrating",
+                                          "label": runner.dev["label"]}
+                continue
+            temp = sensor_value(sensors, runner.source)
+            if temp is None:
+                level, why = float(FALLBACK_PERCENT), "no sensor"
+                runner.level = level
+            else:
+                level, why = runner.target(temp, now)
+            pct = int(round(level))
+            backend = runner.dev["backend"]
+            moved = False
+            if runner.written == pct and now >= self.next_check.get(dev_id, 0.0):
+                self.next_check[dev_id] = now + backend.check_every
+                moved = not backend.matches(str(pct))
+            if runner.written != pct or moved:
+                ok, note = backend.set(str(pct))
+                if ok:
+                    if moved:
+                        log("%s had been moved off its curve's %d%%; put it back"
+                            % (dev_id, pct))
+                    runner.written = pct
+                    self.touched.add(dev_id)
                 else:
-                    pct, why = runner.target(temp, time.monotonic())
-                pct = int(round(pct))
-                if runner.applied_pct is None or pct != int(runner.applied_pct):
-                    ok, note = runner.dev["backend"].set(str(pct))
-                    if ok:
-                        runner.applied_pct = pct
-                        if dev_id not in touched:
-                            touched.append(dev_id)
-                    else:
-                        why = "failed: %s" % note
-                report["fans"][dev_id] = {
-                    "percent": runner.applied_pct, "temp": temp,
-                    "source": runner.source, "why": why,
-                    "label": runner.dev["label"],
-                }
-            write_status(report)
-        except Exception as exc:                    # a loop that dies is worse
-            log("daemon error: %r" % exc)
-        time.sleep(interval)
+                    why = "failed: %s" % note
+            report["fans"][dev_id] = {
+                "percent": runner.written, "temp": temp, "source": runner.source,
+                "why": why, "label": runner.dev["label"],
+            }
 
-    # Leaving fans wherever a stopped daemon left them is how a machine cooks
-    # quietly. Hand every fan we touched back to its firmware on the way out.
-    for dev_id in touched:
-        dev = by_id.get(dev_id)
-        if dev:
-            dev["backend"].set("auto")
-    write_status({"time": time.time(), "fans": {}, "stopped": True})
-    log("curve daemon stopped, %d fan(s) returned to firmware control" % len(touched))
-    return 0
+    # ---- the loop ------------------------------------------------------------
+    def run(self):
+        if os.geteuid() != 0:
+            print("the daemon needs root", file=sys.stderr)
+            return 1
+        import threading
+        self.quit = threading.Event()
+
+        def _stop(_sig, _frame):
+            self.quit.set()
+
+        signal.signal(signal.SIGTERM, _stop)
+        signal.signal(signal.SIGINT, _stop)
+        try:
+            os.makedirs(RUN_DIR, exist_ok=True)
+            os.chmod(RUN_DIR, 0o755)
+        except OSError:
+            pass
+
+        self.discover()
+        migrate_state(self.devices)
+        self.files_changed()
+        self.reload()
+        log("started: %d fan(s) kept at a set speed, %d curve(s) running%s" % (
+            len(self.held), len(self.runners),
+            "" if self.restore else "; saved speeds are not put back at start"))
+
+        while not self.quit.is_set():
+            try:
+                now = time.monotonic()
+                if self.files_changed():
+                    self.reload()
+                    log("settings changed: %d kept, %d curve(s)"
+                        % (len(self.held), len(self.runners)))
+                missing = self.missing()
+                if missing and now >= self.next_look:
+                    self.discover()
+                    self.next_look = now + (5.0 if time.time() - self.started < 180
+                                            else 60.0)
+                    found = [i for i in missing if i in self.by_id]
+                    if found:
+                        log("found %s" % ", ".join(found))
+                        self.reload()
+                sensors = discover_sensors() if self.runners else []
+                report = {"time": time.time(), "pid": os.getpid(),
+                          "fans": {}, "held": {}}
+                self.tick_curves(now, sensors, report)
+                self.keep(now, report)
+                write_status(report)
+            except Exception as exc:                    # a loop that dies is worse
+                log("daemon error: %r" % exc)
+            self.quit.wait(self.interval if self.runners else HOLD_CHECK_S)
+
+        # Leaving fans wherever a stopped curve left them is how a machine cooks
+        # quietly, so those go back to the firmware. A speed set by hand stays:
+        # it was chosen, it is already in the hardware, and it comes back at the
+        # next start anyway.
+        handed = 0
+        for dev_id in list(self.runners):
+            dev = self.by_id.get(dev_id)
+            if dev and dev_id in self.touched:
+                dev["backend"].set("auto")
+                handed += 1
+        write_status({"time": time.time(), "fans": {}, "held": {}, "stopped": True})
+        log("stopped; %d fan(s) a curve was driving went back to the firmware" % handed)
+        return 0
+
+
+def daemon_loop():
+    return Daemon().run()
 
 
 def write_status(report):
@@ -1321,6 +1849,15 @@ def calibrate(dev, steps=11, settle=3.0):
     backend = dev["backend"]
     if not backend.control:
         return {"error": "this device cannot be controlled"}
+    steps = max(2, min(21, int(steps)))
+    # The daemon would otherwise put the fan back after every step.
+    marker = calibration_marker(dev["id"])
+    try:
+        os.makedirs(CALIBRATING_DIR, exist_ok=True)
+        with open(marker, "w") as fh:
+            fh.write(str(os.getpid()))
+    except OSError:
+        marker = None
     before = backend.status()
     table = []
     try:
@@ -1341,6 +1878,11 @@ def calibrate(dev, steps=11, settle=3.0):
         was = before.get("mode")
         backend.set(was if was in ("auto", "full")
                     else str(before.get("percent", 50)))
+        if marker:
+            try:
+                os.unlink(marker)
+            except OSError:
+                pass
 
     spinning = [row for row in table if (row["rpm"] or 0) > 0]
     result = {
@@ -1364,26 +1906,52 @@ def calibrate(dev, steps=11, settle=3.0):
 # --------------------------------------------------------------------------
 # saved speeds
 # --------------------------------------------------------------------------
-def state_load():
+def state_raw():
     try:
         with open(STATE) as fh:
             data = json.load(fh)
     except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def state_load():
+    """The speeds that were set, and what to do with them.
+
+    Version 1 of this file was a bare {device id: value} map, and whether those
+    came back at boot was whether a separate unit happened to be enabled.
+    Version 2 carries that choice itself, and when each speed was set: with
+    putting speeds back switched off, the daemon still keeps the ones set since
+    it started, just not the ones from before."""
+    raw = state_raw()
+    out = {"version": 2, "restore_at_boot": True, "service": True,
+           "speeds": {}, "set_at": {}}
+    if raw is None:
+        return out
+    if raw.get("version") == 2:
+        for key in ("restore_at_boot", "service"):
+            if isinstance(raw.get(key), bool):
+                out[key] = raw[key]
+        speeds = raw.get("speeds") if isinstance(raw.get("speeds"), dict) else {}
+        set_at = raw.get("set_at") if isinstance(raw.get("set_at"), dict) else {}
+    else:
+        speeds, set_at = raw, {}
+    out["speeds"] = {str(k): str(v) for k, v in speeds.items()
+                     if isinstance(v, (str, int))}
+    out["set_at"] = {str(k): float(v) for k, v in set_at.items()
+                     if isinstance(v, (int, float))}
+    return out
 
 
 def state_save(data):
     if os.geteuid() != 0:
         return False
-    try:
-        os.makedirs(STATE_DIR, exist_ok=True)
-        with open(STATE, "w") as fh:
-            json.dump(data, fh, indent=2, sort_keys=True)
-            fh.write("\n")
-        return True
-    except OSError:
-        return False
+    clean = {"version": 2,
+             "restore_at_boot": bool(data.get("restore_at_boot", True)),
+             "service": bool(data.get("service", True)),
+             "speeds": dict(data.get("speeds") or {}),
+             "set_at": dict(data.get("set_at") or {})}
+    return write_json(STATE, clean) is None
 
 
 def hwbackup_load():
@@ -1398,14 +1966,7 @@ def hwbackup_load():
 def hwbackup_save(data):
     if os.geteuid() != 0:
         return False
-    try:
-        os.makedirs(STATE_DIR, exist_ok=True)
-        with open(HWBACKUP, "w") as fh:
-            json.dump(data, fh, indent=2, sort_keys=True)
-            fh.write("\n")
-        return True
-    except OSError:
-        return False
+    return write_json(HWBACKUP, data) is None
 
 
 def migrate_state(devices):
@@ -1413,12 +1974,17 @@ def migrate_state(devices):
     the per-channel ids once, so an upgrade keeps what the user chose."""
     if os.geteuid() != 0:
         return
-    saved = state_load()
+    state = state_load()
+    saved = state["speeds"]
     if not saved:
         return
     changed = False
     for legacy in list(saved):
-        if legacy.startswith("hwmon:") or legacy.startswith("nvidia:"):
+        # Today's ids. A graphics card's is its PCI address, which the
+        # "gpu:" test below would otherwise take for a 1.x one and hand its
+        # speed to every other card in the machine.
+        if legacy.startswith(("hwmon:", "nvidia:")) or \
+                re.match(r"gpu:[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]", legacy):
             continue
         value = saved[legacy]
         if legacy.startswith("mb:"):
@@ -1435,30 +2001,49 @@ def migrate_state(devices):
         saved.pop(legacy, None)
         changed = True
     if changed:
-        state_save(saved)
+        state_save(state)
 
 
 # --------------------------------------------------------------------------
 # systemd
 # --------------------------------------------------------------------------
-def unit_enabled(unit):
-    r = run(["systemctl", "is-enabled", unit], timeout=6)
-    return (r.stdout.strip() if r else "") or "disabled"
+def daemon_units():
+    """(LoadState, UnitFileState, ActiveState) of the service, in one call -
+    this runs on every poll. Empty strings when there is no systemctl."""
+    r = run(["systemctl", "show", DAEMON_UNIT, "-p", "LoadState",
+             "-p", "UnitFileState", "-p", "ActiveState"], timeout=6)
+    if r is None or r.returncode != 0:
+        return "", "", ""
+    vals = dict(line.split("=", 1) for line in r.stdout.splitlines() if "=" in line)
+    return (vals.get("LoadState", ""), vals.get("UnitFileState", ""),
+            vals.get("ActiveState", ""))
 
 
-def unit_active(unit):
-    r = run(["systemctl", "is-active", unit], timeout=6)
-    return (r.stdout.strip() if r else "") or "inactive"
-
-
-def unit_set(unit, on, start=True):
-    action = ["enable", "--now"] if (on and start) else \
-             ["disable", "--now"] if start else \
-             ["enable"] if on else ["disable"]
-    r = run(["systemctl"] + action + [unit], timeout=30)
+def unit_set(unit, on):
+    r = run(["systemctl", "enable" if on else "disable", "--now", unit], timeout=30)
     if r is None:
         return 1, "systemctl did not answer"
     return r.returncode, (r.stderr or "").strip()
+
+
+def ensure_daemon():
+    """Start the service if it should be running and is not.
+
+    Everything that saves a speed or a curve calls this, so an install whose
+    package scripts never ran - a manual copy, a distribution that skips them -
+    still ends up with something keeping what was set. A service switched off
+    from the settings window stays off."""
+    if os.geteuid() != 0 or not state_load().get("service", True):
+        return
+    load, filestate, active = daemon_units()
+    if load != "loaded":
+        return
+    if active in ("active", "activating", "reloading") and \
+            filestate in ("enabled", "enabled-runtime", "static", "linked", "alias"):
+        return
+    code, err = unit_set(DAEMON_UNIT, True)
+    if code != 0 and err:
+        print("could not start %s: %s" % (DAEMON_UNIT, err), file=sys.stderr)
 
 
 # --------------------------------------------------------------------------
@@ -1469,17 +2054,32 @@ def cmd_status():
     devices = discover()
     migrate_state(devices)
     store = curves_load()
+    state = state_load()
+    load, filestate, active = daemon_units()
+    if load == "not-found":
+        daemon = boot = "not-found"
+    elif load:
+        daemon = filestate
+        boot = "enabled" if state["restore_at_boot"] else "disabled"
+    else:
+        daemon = boot = ""
     print(json.dumps({
         "version": VERSION,
         "devices": [device_status(d, sensors) for d in devices],
         "sensors": [{k: v for k, v in s.items() if k != "path"} for s in sensors],
         "curves": store,
         "runtime": read_run_status(),
-        "saved": state_load(),
+        "saved": state["speeds"],
+        "restore_at_boot": state["restore_at_boot"],
         "units": {
-            "boot": unit_enabled(BOOT_UNIT),
-            "curve": unit_enabled(CURVE_UNIT),
-            "curve_active": unit_active(CURVE_UNIT),
+            "daemon": daemon,
+            "daemon_active": active,
+            # What a 2.3 tray reads, still running after an upgrade until it
+            # is restarted: "boot" is whether speeds come back at start, and
+            # "curve" is the one service that now does both.
+            "boot": boot,
+            "curve": daemon,
+            "curve_active": active,
         },
     }))
     return 0
@@ -1498,27 +2098,33 @@ def cmd_set(dev_id, value):
         print("no such device: %s" % dev_id, file=sys.stderr)
         return 2
 
-    # A hand-set speed and a running curve are the same knob; the curve would
-    # simply undo this a second later, so say so and stand down.
+    ok, note = dev["backend"].set(value)
+    if not ok:
+        print(note or "failed", file=sys.stderr)
+        return 1
+
+    # Saved before the curve is switched off, so that when the daemon sees the
+    # curve go it already finds this speed to keep, not the one before it.
+    state = state_load()
+    state["speeds"][dev_id] = value
+    state["set_at"][dev_id] = time.time()
+    saved = state_save(state)
+
+    # A hand-set speed and a running curve are the same knob, and the curve
+    # would simply undo this a second later. The last thing asked for wins.
     store = curves_load()
     curve = (store.get("curves") or {}).get(dev_id)
-    if curve and curve.get("enabled") and unit_active(CURVE_UNIT) == "active":
+    note_curve = ""
+    if isinstance(curve, dict) and curve.get("enabled"):
         curve["enabled"] = False
         curves_save(store)
         note_curve = " (its fan curve was switched off)"
-    else:
-        note_curve = ""
-
-    ok, note = dev["backend"].set(value)
-    if ok:
-        saved = state_load()
-        saved[dev_id] = value
-        state_save(saved)
-        if note or note_curve:
-            print((note or "") + note_curve)
-    else:
-        print(note or "failed", file=sys.stderr)
-    return 0 if ok else 1
+    ensure_daemon()
+    if not saved:
+        note_curve += " - but it could not be saved, so a reboot will lose it"
+    if note or note_curve:
+        print((note or "") + note_curve)
+    return 0
 
 
 def cmd_curve(args):
@@ -1531,11 +2137,15 @@ def cmd_curve(args):
         except ValueError as exc:
             print("unreadable JSON on stdin: %s" % exc, file=sys.stderr)
             return 2
+        if not isinstance(data, dict):
+            print("the curves have to be a JSON object", file=sys.stderr)
+            return 2
         ok, err = curves_save(data)
         if not ok:
             print(err, file=sys.stderr)
             return 1
         # a running daemon notices the file changing on its own
+        ensure_daemon()
         return 0
     if args[0] == "enable" and len(args) == 3:
         store = curves_load()
@@ -1546,6 +2156,7 @@ def cmd_curve(args):
         if not ok:
             print(err, file=sys.stderr)
             return 1
+        ensure_daemon()
         return 0
     print("curve takes show, set or enable <id> <on|off>", file=sys.stderr)
     return 2
@@ -1603,15 +2214,20 @@ def cmd_calibrate(args):
 
 
 def cmd_restore():
-    saved = state_load()
+    """Put every saved speed back now - the daemon does this when it starts;
+    this is for doing it by hand."""
+    if os.geteuid() != 0:
+        print("needs root", file=sys.stderr)
+        return 2
     devices = discover()
     by_id = {d["id"]: d for d in devices}
     migrate_state(devices)
-    saved = state_load()
+    state = state_load()
+    curves = (curves_load().get("curves") or {})
     failed = 0
-    for dev_id, value in saved.items():
+    for dev_id, value in state["speeds"].items():
         dev = by_id.get(dev_id)
-        if not dev:
+        if not dev or (curves.get(dev_id) or {}).get("enabled"):
             continue
         ok, note = dev["backend"].set(value)
         print("%s -> %s%s" % (dev_id, value, "" if ok else "  FAILED: %s" % note))
@@ -1619,17 +2235,90 @@ def cmd_restore():
     return 1 if failed else 0
 
 
-def cmd_unit(unit, arg):
+def cmd_daemon(arg):
     if arg == "status":
-        print("%s %s" % (unit_enabled(unit), unit_active(unit)))
+        _load, filestate, active = daemon_units()
+        print("%s %s" % (filestate or "unknown", active or "unknown"))
         return 0
-    if arg in ("on", "off"):
-        code, err = unit_set(unit, arg == "on")
-        if code != 0 and err:
-            print(err, file=sys.stderr)
-        return code
-    print("takes on, off or status", file=sys.stderr)
-    return 2
+    if arg not in ("on", "off"):
+        print("daemon takes on, off or status", file=sys.stderr)
+        return 2
+    if os.geteuid() != 0:
+        print("needs root", file=sys.stderr)
+        return 2
+    state = state_load()
+    state["service"] = arg == "on"
+    state_save(state)
+    code, err = unit_set(DAEMON_UNIT, arg == "on")
+    if code != 0 and err:
+        print(err, file=sys.stderr)
+    return code
+
+
+def cmd_boot(arg):
+    state = state_load()
+    if arg == "status":
+        _load, _filestate, active = daemon_units()
+        print("%s %s" % ("enabled" if state["restore_at_boot"] else "disabled",
+                         active or "unknown"))
+        return 0
+    if arg not in ("on", "off"):
+        print("boot takes on, off or status", file=sys.stderr)
+        return 2
+    if os.geteuid() != 0:
+        print("needs root", file=sys.stderr)
+        return 2
+    state["restore_at_boot"] = arg == "on"
+    if not state_save(state):
+        print("could not write %s" % STATE, file=sys.stderr)
+        return 1
+    if arg == "on":
+        ensure_daemon()
+    return 0
+
+
+def cmd_migrate():
+    """What the packages run after installing or upgrading.
+
+    Up to 2.3 there were two units: a restore at boot that had to be switched
+    on by hand, and a curve loop. Their choices move into state.json and the
+    one service takes over from both. Safe to run any number of times."""
+    if os.geteuid() != 0:
+        print("migrate needs root", file=sys.stderr)
+        return 2
+    links = {unit: glob.glob(os.path.join(SYSTEMD_ETC, "*.wants", unit))
+             for unit in OLD_UNITS}
+    raw = state_raw()
+    state = state_load()
+    if raw is not None and raw.get("version") != 2:
+        # A 2.3 file: speeds only came back at boot if the restore unit was on.
+        state["restore_at_boot"] = bool(links["fan-control-kde-restore.service"]
+                                        or links["fan-tray-restore.service"])
+    if raw is None or raw.get("version") != 2:
+        state_save(state)
+
+    for unit in OLD_UNITS:
+        run(["systemctl", "stop", unit], timeout=30)
+    removed = 0
+    for paths in links.values():
+        for path in paths:
+            try:
+                os.unlink(path)
+                removed += 1
+            except OSError:
+                pass
+    run(["systemctl", "daemon-reload"], timeout=30)
+
+    if state["service"]:
+        run(["systemctl", "enable", DAEMON_UNIT], timeout=30)
+        # restart rather than start: after an upgrade the one running is the
+        # old code
+        run(["systemctl", "restart", DAEMON_UNIT], timeout=30)
+    print("fan-control-kde: %s; saved speeds %s put back at start%s" % (
+        "service enabled" if state["service"] else "service left off",
+        "are" if state["restore_at_boot"] else "are not",
+        "; %d old unit link(s) removed" % removed if removed else ""))
+    return 0
 
 
 def main():
@@ -1655,12 +2344,14 @@ def main():
         return cmd_calibrate(args)
     if cmd == "restore":
         return cmd_restore()
+    if cmd == "migrate":
+        return cmd_migrate()
     if cmd == "daemon":
         if not args:
             return daemon_loop()
-        return cmd_unit(CURVE_UNIT, args[0])
+        return cmd_daemon(args[0])
     if cmd == "boot" and len(args) == 1:
-        return cmd_unit(BOOT_UNIT, args[0])
+        return cmd_boot(args[0])
 
     print("unknown command: %s" % cmd, file=sys.stderr)
     print(__doc__.strip(), file=sys.stderr)

@@ -1,6 +1,6 @@
 # Maintainer: gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com>
 pkgname=fan-control-kde
-pkgver=2.3.1
+pkgver=2.4.0
 pkgrel=1
 pkgdesc="Tray applet for fan speed, fan curves and temperatures"
 arch=('any')
@@ -10,20 +10,22 @@ depends=('python' 'pyside6' 'polkit' 'systemd')
 optdepends=(
   'lm_sensors: detect the motherboard Super I/O chip'
   'pciutils: readable graphics card names'
-  'nvidia-settings: fan control on NVIDIA cards'
 )
 makedepends=('make')
 backup=('etc/polkit-1/rules.d/49-fan-control-kde.rules')
+install=fan-control-kde.install
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
+# GitHub names the top directory of the archive after the repository.
+_src="Fan-Control-KDE-$pkgver"
 
 check() {
-  cd "$pkgname-$pkgver"
+  cd "$_src"
   make check
 }
 
 package() {
-  cd "$pkgname-$pkgver"
+  cd "$_src"
   make install DESTDIR="$pkgdir" PREFIX=/usr
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"

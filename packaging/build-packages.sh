@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Builds every package into dist/:  .rpm (Fedora), .deb (Debian/Ubuntu),
-# .pkg.tar.zst (Arch) and an .AppImage (thin: uses the system python3+PySide6).
+# Builds every package into dist/:  .rpm (Fedora, openSUSE), .deb (Debian,
+# Ubuntu), the fan-control-kde-pyside6 .deb for the ones that package no
+# PySide6, .pkg.tar.zst (Arch) and an .AppImage (the system's python3, and its
+# PySide6 when it has one - otherwise the copy inside).
 set -euo pipefail
 
 NAME=fan-control-kde
 BIN=fan-control
-VERSION=2.3.1
+VERSION=2.4.0
 RELEASE=1
 MAINT="Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com>"
 URL="https://github.com/gabrielmf1998/Fan-Control-KDE"
@@ -35,9 +37,8 @@ stage_tree() {
         "$d/etc/polkit-1/rules.d/49-fan-control-kde.rules"
     install -Dm 0644 "$ROOT/packaging/$NAME.desktop" \
         "$d/usr/share/applications/$NAME.desktop"
-    for unit in fan-control-kde-restore.service fan-control-kde-curve.service; do
-        install -Dm 0644 "$ROOT/systemd/$unit" "$d/usr/lib/systemd/system/$unit"
-    done
+    install -Dm 0644 "$ROOT/systemd/fan-control-kde-daemon.service" \
+        "$d/usr/lib/systemd/system/fan-control-kde-daemon.service"
     install -Dm 0644 "$ROOT/systemd/fan-control-kde.service" \
         "$d/usr/lib/systemd/user/fan-control-kde.service"
     for s in 48 64 128 256 512; do
@@ -55,8 +56,19 @@ stage_tree() {
 say "source tarball"
 SRCDIR="$WORK/$NAME-$VERSION"; mkdir -p "$SRCDIR"
 cp -r "$ROOT"/{fancontrol,helper,polkit,systemd,assets,packaging,docs,Makefile,LICENSE,README.md,install.sh,install-online.sh} "$SRCDIR/"
-rm -rf "$SRCDIR/fancontrol/__pycache__" "$SRCDIR/packaging/build-packages.sh"
+rm -rf "$SRCDIR/fancontrol/__pycache__" "$SRCDIR/packaging/build-packages.sh" \
+       "$SRCDIR/packaging/bundle-pyside6.py"
 tar -C "$WORK" -czf "$WORK/$NAME-$VERSION.tar.gz" "$NAME-$VERSION"
+
+# ── a PySide6 for distributions without one ─────────────────
+# Ubuntu 24.04 and its derivatives (Kubuntu, KDE neon), and Debian 12, package
+# none. The official wheel, pinned and hash-checked, trimmed to what the tray
+# uses; it goes into its own .deb and into the AppImage. See
+# packaging/bundle-pyside6.py.
+say "bundled PySide6"
+PYSIDE="$WORK/pyside6"
+python3 "$ROOT/packaging/bundle-pyside6.py" "$PYSIDE"
+PYSIDE_VERSION="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' "$ROOT/packaging/bundle-pyside6.py")"
 
 # ── RPM ─────────────────────────────────────────────────────
 if command -v rpmbuild >/dev/null; then
@@ -84,20 +96,21 @@ Maintainer: $MAINT
 Section: utils
 Priority: optional
 Homepage: $URL
-Depends: python3, python3-pyside6.qtwidgets, python3-pyside6.qtnetwork, policykit-1 | polkitd, systemd
+Depends: python3, python3-pyside6.qtwidgets | $NAME-pyside6, python3-pyside6.qtnetwork | $NAME-pyside6, policykit-1 | polkitd, systemd
 Recommends: lm-sensors, pciutils
-Suggests: nvidia-settings
 Description: $SUMMARY
  Fan Control KDE puts every fan the machine will admit to having in the system
  tray: motherboard headers one by one through the kernel's own hwmon interface,
  AMD cards through amdgpu and its overdrive fan curve, and NVIDIA cards through
- nvidia-settings.
+ NVML, with no X display or Coolbits needed.
  .
  Set a speed by hand, hand a fan back to its firmware, or draw a fan curve on a
- graph and have a small system service run it - with hysteresis, separate ramp
- rates up and down, a spin-up kick for fans that will not start from stopped,
- and a zero-rpm cut-off. Where the hardware has a curve of its own, the same
- curve can be written into the firmware so it runs with nothing loaded at all.
+ graph. A small system service keeps every speed where it was set - putting it
+ back if the firmware moves it - restores them all after a reboot, and runs the
+ curves, with hysteresis, separate ramp rates up and down, a spin-up kick for
+ fans that will not start from stopped, and a zero-rpm cut-off. Where the
+ hardware has a curve of its own, the same curve can be written into the
+ firmware so it runs with nothing loaded at all.
  .
  Calibration sweeps a fan and writes down the duty it actually starts at, which
  is the one thing a curve cannot be guessed without.
@@ -121,12 +134,11 @@ CONFFILES
     cat > "$DEB/DEBIAN/postinst" <<'POSTINST'
 #!/bin/sh
 set -e
-# 1.x shipped this unit under a different name; carry the user's choice over.
-if [ -L /etc/systemd/system/graphical.target.wants/fan-tray-restore.service ]; then
-    rm -f /etc/systemd/system/graphical.target.wants/fan-tray-restore.service
-    systemctl enable fan-control-kde-restore.service >/dev/null 2>&1 || true
-fi
 systemctl daemon-reload >/dev/null 2>&1 || true
+# The one service that keeps the speeds and runs the curves. This also folds
+# 2.3's two units into it, keeping what was switched on there, and restarts it
+# so an upgrade runs the new code.
+/usr/libexec/fan-control-helper migrate || true
 if [ -x /usr/bin/update-desktop-database ]; then
     update-desktop-database -q /usr/share/applications || true
 fi
@@ -139,14 +151,42 @@ POSTINST
 #!/bin/sh
 set -e
 if [ "$1" = remove ]; then
-    systemctl disable --now fan-control-kde-curve.service >/dev/null 2>&1 || true
-    systemctl disable --now fan-control-kde-restore.service >/dev/null 2>&1 || true
+    systemctl disable --now fan-control-kde-daemon.service >/dev/null 2>&1 || true
 fi
 exit 0
 PRERM
     chmod 0755 "$DEB/DEBIAN/postinst" "$DEB/DEBIAN/prerm"
     dpkg-deb --root-owner-group --build "$DEB" \
         "$DIST/${NAME}_${VERSION}-${RELEASE}_all.deb" >/dev/null
+
+    say "DEB (bundled PySide6 $PYSIDE_VERSION)"
+    RT="$WORK/deb-pyside6"
+    install -d "$RT/usr/lib/$NAME/pyside6" "$RT/usr/share/doc/$NAME-pyside6" "$RT/DEBIAN"
+    cp -r "$PYSIDE/PySide6" "$PYSIDE/shiboken6" "$RT/usr/lib/$NAME/pyside6/"
+    install -m 0644 "$PYSIDE/copyright" "$RT/usr/share/doc/$NAME-pyside6/copyright"
+    cat > "$RT/DEBIAN/control" <<CONTROL
+Package: $NAME-pyside6
+Version: $PYSIDE_VERSION-1
+Architecture: amd64
+Maintainer: $MAINT
+Installed-Size: $(du -sk "$RT/usr" | cut -f1)
+Section: python
+Priority: optional
+Homepage: $URL
+Depends: python3 (>= 3.9), libc6 (>= 2.34), libstdc++6, libgcc-s1, libglib2.0-0t64 | libglib2.0-0, libdbus-1-3, libgl1, libegl1, libfontconfig1, libfreetype6, libbrotli1, zlib1g, libzstd1, libgssapi-krb5-2, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libx11-xcb1, libxcb1, libxcb-cursor0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-randr0, libxcb-render0, libxcb-render-util0, libxcb-shape0, libxcb-shm0, libxcb-sync1, libxcb-util1, libxcb-xfixes0, libxcb-xkb1, libwayland-client0, libwayland-cursor0
+Recommends: libssl3t64 | libssl3
+Description: PySide6 $PYSIDE_VERSION for Fan Control KDE, where the distribution has none
+ Ubuntu 24.04 and what is built on it (Kubuntu, KDE neon, Linux Mint 22,
+ Pop!_OS 24.04), and Debian 12, do not package PySide6. This is the official
+ Qt for Python $PYSIDE_VERSION wheel, unmodified, trimmed to what Fan Control
+ KDE uses: QtCore, QtGui, QtWidgets, QtNetwork and QtDBus, with the xcb and
+ Wayland platform plugins.
+ .
+ It lives in /usr/lib/$NAME/pyside6, off Python's path. Only $NAME picks it
+ up, and only when the distribution offers no PySide6 of its own.
+CONTROL
+    dpkg-deb -Zxz --root-owner-group --build "$RT" \
+        "$DIST/${NAME}-pyside6_${PYSIDE_VERSION}-1_amd64.deb" >/dev/null
 else
     say "dpkg-deb unavailable — skipping DEB"
 fi
@@ -154,6 +194,9 @@ fi
 # ── Arch ────────────────────────────────────────────────────
 say "Arch package"
 PKG="$WORK/pkg"; stage_tree "$PKG"
+# polkit's own package makes this 750; anything else and pacman warns that the
+# permissions differ on every install.
+chmod 0750 "$PKG/etc/polkit-1/rules.d"
 SIZE=$(du -sb "$PKG" | cut -f1)
 cat > "$PKG/.PKGINFO" <<PKGINFO
 pkgname = $NAME
@@ -172,18 +215,20 @@ depend = polkit
 depend = systemd
 optdepend = lm_sensors: detect the motherboard's Super I/O chip
 optdepend = pciutils: readable graphics card names
-optdepend = nvidia-settings: fan control on NVIDIA cards
 backup = etc/polkit-1/rules.d/49-fan-control-kde.rules
 PKGINFO
+# pacman runs these; without them an upgrade would leave 2.3's units behind
+# and nothing would start the one service that keeps the speeds.
+cp "$ROOT/packaging/arch/$NAME.install" "$PKG/.INSTALL"
 ( cd "$PKG"
   TAROPTS=(--no-xattrs --no-fflags --uid 0 --gid 0 --uname root --gname root)
   LANG=C bsdtar "${TAROPTS[@]}" -czf .MTREE --format=mtree \
       --options='!all,use-set,type,uid,gid,mode,time,size,md5,sha256,link' \
-      .PKGINFO etc usr
-  LANG=C bsdtar "${TAROPTS[@]}" -cf - .PKGINFO .MTREE etc usr |
+      .PKGINFO .INSTALL etc usr
+  LANG=C bsdtar "${TAROPTS[@]}" -cf - .PKGINFO .INSTALL .MTREE etc usr |
       zstd -q -c -T0 -18 > "$DIST/$NAME-$VERSION-$RELEASE-any.pkg.tar.zst" )
 
-# ── AppImage (thin: system python3 + PySide6) ───────────────
+# ── AppImage (the system's python3; its PySide6, or the one inside) ──
 say "AppImage"
 if AT="$(command -v appimagetool 2>/dev/null)"; then :; else
     AT="$WORK/appimagetool"
@@ -197,29 +242,30 @@ if [ -n "$AT" ]; then
     install -m 0644 "$ROOT"/fancontrol/*.py "$APPDIR/usr/share/$NAME/fancontrol/"
     install -Dm 0755 "$ROOT/helper/fan-control-helper" \
         "$APPDIR/usr/libexec/fan-control-helper"
+    install -d "$APPDIR/usr/lib/$NAME/pyside6"
+    cp -r "$PYSIDE/PySide6" "$PYSIDE/shiboken6" "$PYSIDE/copyright" \
+        "$APPDIR/usr/lib/$NAME/pyside6/"
     install -Dm 0644 "$ROOT/assets/$NAME-256.png" "$APPDIR/$NAME.png"
     install -Dm 0644 "$ROOT/assets/$NAME-256.png" \
         "$APPDIR/usr/share/icons/hicolor/256x256/apps/$NAME.png"
     install -Dm 0644 "$ROOT/packaging/$NAME.desktop" "$APPDIR/$NAME.desktop"
     cat > "$APPDIR/AppRun" <<'APPRUN'
 #!/bin/sh
-# Fan Control KDE AppImage: a thin wrapper around the system python3 + PySide6.
+# Fan Control KDE AppImage: the system's python3, and its PySide6 when it has
+# one - otherwise the copy inside this image (Qt for Python, trimmed).
 HERE="$(dirname "$(readlink -f "$0")")"
-if ! python3 -c "import PySide6.QtWidgets" 2>/dev/null; then
-    echo "Fan Control KDE needs PySide6 installed on the system:" >&2
-    echo "  Fedora:        sudo dnf install python3-pyside6" >&2
-    echo "  Debian/Ubuntu: sudo apt install python3-pyside6.qtwidgets" >&2
-    echo "  Arch:          sudo pacman -S pyside6" >&2
+if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null; then
+    echo "Fan Control KDE needs python3, 3.9 or newer, on the system." >&2
     exit 1
 fi
 # The privileged helper cannot live inside the image: pkexec will only run a
 # real file on disk that a polkit policy names by path. Point at the packaged
 # one, and say so plainly when it is not there.
 if [ ! -x /usr/libexec/fan-control-helper ]; then
-    echo "Fan Control KDE: /usr/libexec/fan-control-helper is missing." >&2
-    echo "Without it nothing can be read or changed, because every fan control" >&2
-    echo "on Linux needs root. Install the .rpm/.deb/pkg, or run install.sh" >&2
-    echo "from the repository, and the AppImage will find it." >&2
+    echo "Fan Control KDE: /usr/libexec/fan-control-helper is missing, so the" >&2
+    echo "fans can be watched but not changed: every fan control on Linux needs" >&2
+    echo "root. Install the .rpm/.deb/pkg, or run install.sh from the" >&2
+    echo "repository, and the AppImage will use it." >&2
 fi
 export PYTHONPATH="$HERE/usr/share/fan-control-kde${PYTHONPATH:+:$PYTHONPATH}"
 exec python3 -m fancontrol "$@"
@@ -234,7 +280,7 @@ else
 fi
 
 # ── checksums ───────────────────────────────────────────────
-( cd "$DIST" && sha256sum ./*.rpm ./*.deb ./*.pkg.tar.zst ./*.AppImage \
-    > SHA256SUMS 2>/dev/null || true )
+( cd "$DIST" && sha256sum ./*.rpm ./*_all.deb ./*_amd64.deb ./*.pkg.tar.zst \
+    ./*.AppImage > SHA256SUMS 2>/dev/null || true )
 say "done. Artifacts in dist/:"
 ls -1sh "$DIST"

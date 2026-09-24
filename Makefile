@@ -15,7 +15,7 @@ PKGDIR      := $(SHAREDIR)/fan-control-kde
 ACTION := io.github.gabrielmf1998.fancontrol
 SIZES  := 48 64 128 256 512
 
-.PHONY: all install uninstall check icons packages
+.PHONY: all install uninstall check test icons packages
 
 all:
 	@echo "Nothing to build -- it is Python. Run 'sudo make install'."
@@ -25,6 +25,9 @@ check:
 	    helper/fan-control-installer
 	@rm -rf fancontrol/__pycache__
 	@echo "syntax OK"
+
+test:
+	python3 -m unittest discover -s tests -v
 
 icons:
 	python3 assets/gen_icons.py
@@ -44,10 +47,8 @@ install:
 	    $(RULESDIR)/49-fan-control-kde.rules
 	install -Dm644 packaging/fan-control-kde.desktop \
 	    $(APPDIR)/fan-control-kde.desktop
-	install -Dm644 systemd/fan-control-kde-restore.service \
-	    $(UNITDIR)/fan-control-kde-restore.service
-	install -Dm644 systemd/fan-control-kde-curve.service \
-	    $(UNITDIR)/fan-control-kde-curve.service
+	install -Dm644 systemd/fan-control-kde-daemon.service \
+	    $(UNITDIR)/fan-control-kde-daemon.service
 	install -Dm644 systemd/fan-control-kde.service \
 	    $(USERUNITDIR)/fan-control-kde.service
 	for s in $(SIZES); do \
@@ -63,6 +64,7 @@ uninstall:
 	rm -f  $(LIBEXECDIR)/fan-control-helper $(LIBEXECDIR)/fan-control-installer
 	rm -f  $(POLICYDIR)/$(ACTION).policy
 	rm -f  $(RULESDIR)/49-fan-control-kde.rules
+	rm -f  $(UNITDIR)/fan-control-kde-daemon.service
 	rm -f  $(UNITDIR)/fan-control-kde-restore.service
 	rm -f  $(UNITDIR)/fan-control-kde-curve.service
 	rm -f  $(USERUNITDIR)/fan-control-kde.service

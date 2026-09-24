@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import signal
 import sys
+import time
 
 from PySide6.QtCore import QTimer
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
@@ -35,9 +36,15 @@ def main(argv: list[str] | None = None) -> int:
     app.setWindowIcon(icons.app_icon())
     app.setQuitOnLastWindowClosed(False)
 
-    if _already_running(APP_ID):
-        print(f"{APP_NAME} is already running.", file=sys.stderr)
-        return 0
+    # A restart after an update: the copy being replaced may still be on its
+    # way out, so give it a moment to let go before calling this a duplicate.
+    patience = 40 if "--restarted" in argv else 0
+    while _already_running(APP_ID):
+        if patience <= 0:
+            print(f"{APP_NAME} is already running.", file=sys.stderr)
+            return 0
+        patience -= 1
+        time.sleep(0.25)
     guard = QLocalServer()
     guard.listen(APP_ID)
 

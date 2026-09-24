@@ -10,20 +10,25 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signal
+from PySide6.QtWidgets import QApplication
 
 HELPER_NAME = "fan-control-helper"
 INSTALLER_NAME = "fan-control-installer"
 
 
 def _find(name: str) -> str:
-    """A packaged binary, or the one in this checkout when running from source."""
+    """A packaged binary, or the one in this checkout when running from source,
+    or - last - the copy inside an AppImage. That one can read the fans but not
+    change them: pkexec only runs a file a polkit policy names by path."""
     here = Path(__file__).resolve().parent
     for cand in (Path("/usr/libexec") / name,
                  Path("/usr/local/libexec") / name,
-                 here.parent / "helper" / name):
+                 here.parent / "helper" / name,
+                 here.parents[2] / "libexec" / name):
         if cand.is_file():
             return str(cand)
     return shutil.which(name) or name
@@ -31,6 +36,25 @@ def _find(name: str) -> str:
 
 def helper_path() -> str:
     return _find(HELPER_NAME)
+
+
+def relaunch() -> None:
+    """Start a fresh copy of the tray a moment after this one has gone.
+
+    Only one copy may run at a time, so the new one waits for this one to have
+    let go of its single-instance socket before it starts."""
+    target = (os.environ.get("APPIMAGE") or shutil.which("fan-control")
+              or os.path.abspath(sys.argv[0]))
+    # Started by the user's systemd rather than by this process: a tray
+    # launched from autostart runs in a unit that takes everything it spawned
+    # down with it the moment it exits. systemd-run returns as soon as the
+    # timer exists, and it has to have returned before this process goes.
+    code, _out, _err = run(["systemd-run", "--user", "--collect", "--quiet",
+                            "--on-active=2", target, "--restarted"], timeout=10)
+    if code != 0:
+        QProcess.startDetached("/bin/sh", ["-c", 'sleep 1.5; exec "$0" --restarted',
+                                           target])
+    QApplication.instance().quit()
 
 
 def installer_path() -> str:
@@ -198,7 +222,8 @@ def distro_family() -> str:
     except OSError:
         return ""
     for token in ids:
-        if token in ("fedora", "rhel", "centos", "rocky", "almalinux", "nobara"):
+        if token in ("fedora", "rhel", "centos", "rocky", "almalinux", "nobara",
+                     "opensuse", "suse", "opensuse-tumbleweed", "opensuse-leap"):
             return "rpm"
         if token in ("debian", "ubuntu", "linuxmint", "pop"):
             return "deb"

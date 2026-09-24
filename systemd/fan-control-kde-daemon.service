@@ -1,0 +1,30 @@
+[Unit]
+Description=Fan Control KDE: keeps the fan speeds you set, and runs fan curves
+Documentation=https://github.com/gabrielmf1998/Fan-Control-KDE
+# The Super I/O and GPU drivers usually load before this, but not always; the
+# daemon keeps looking for any fan it has orders for and has not found yet.
+After=systemd-modules-load.service
+# 2.3 and earlier did this with two units. Whichever of them is still loaded
+# during an upgrade must not fight this one for the fans.
+Conflicts=fan-control-kde-curve.service fan-control-kde-restore.service
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/fan-control-helper daemon
+Restart=on-failure
+RestartSec=5
+# Every fan a curve was driving goes back to the firmware on the way out, so
+# it needs long enough to do that before it is killed.
+TimeoutStopSec=20
+KillSignal=SIGTERM
+Nice=-5
+# It reads hwmon, writes pwm, talks to the NVIDIA driver, and nothing else on
+# the machine is its business.
+ProtectHome=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

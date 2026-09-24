@@ -272,19 +272,31 @@ class FanRow(QGroupBox):
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
         self._debounce.timeout.connect(self._commit)
+        # Only a hand on the control sends anything. Setting the range and
+        # showing the live reading move the slider too, and when those sent a
+        # speed, merely opening this window put a graphics card whose driver
+        # starts at 30% on a fixed speed - saving it over the one chosen
+        # before, and switching off its curve.
+        self._touched = False
+        self._shown_value: int | None = None
 
+        rng = dev.get("range") or [0, 100]
+        lo = max(0, min(100, int(rng[0])))
         row = QHBoxLayout()
         self.slider = QSlider(Qt.Horizontal)
-        self.slider.setRange(0, 100)
+        self.slider.setRange(lo, 100)
         self.slider.setPageStep(5)
         self.slider.setTracking(True)
         self.slider.valueChanged.connect(self._slider_moved)
+        self.slider.actionTriggered.connect(self._slider_action)
+        self.slider.sliderPressed.connect(self._touch)
         self.slider.sliderReleased.connect(self._released)
         row.addWidget(self.slider, 1)
 
         self.spin = QSpinBox()
-        self.spin.setRange(0, 100)
+        self.spin.setRange(lo, 100)
         self.spin.setSuffix(" %")
+        self.spin.valueChanged.connect(self._spin_changed)
         self.spin.editingFinished.connect(self._commit)
         row.addWidget(self.spin)
 
@@ -302,13 +314,19 @@ class FanRow(QGroupBox):
             row.addWidget(button)
         lay.addLayout(row)
 
-        rng = dev.get("range") or [0, 100]
-        if rng[0] > 0:
+        if lo > 0:
             lay.addWidget(_hint(
-                f"This device only accepts {rng[0]}–{rng[1]}%; anything lower is "
+                f"This device only accepts {lo}–{rng[1]}%; anything lower is "
                 "clamped by its driver."))
-            self.slider.setMinimum(int(rng[0]))
-            self.spin.setMinimum(int(rng[0]))
+
+    def _touch(self, *_args) -> None:
+        if not self._settling:
+            self._touched = True
+
+    def _spin_changed(self, _value: int) -> None:
+        # Typing, the arrows, or the wheel - all of which focus it first.
+        if self.spin.hasFocus():
+            self._touch()
 
     def _slider_moved(self, value: int) -> None:
         if self._settling:
@@ -316,7 +334,12 @@ class FanRow(QGroupBox):
         self.spin.blockSignals(True)
         self.spin.setValue(value)
         self.spin.blockSignals(False)
-        if not self.slider.isSliderDown():
+
+    def _slider_action(self, action: int) -> None:
+        # Clicks on the groove, the wheel and the arrow keys; a drag commits
+        # when it is let go.
+        self._touch()
+        if action != QSlider.SliderAction.SliderMove.value:
             self._debounce.start(350)
 
     def _released(self) -> None:
@@ -324,10 +347,13 @@ class FanRow(QGroupBox):
         self._commit()
 
     def _commit(self) -> None:
-        if self.slider is None or self._settling:
+        if self.slider is None or self._settling or not self._touched:
             return
         self._debounce.stop()
+        self._touched = False
         value = self.spin.value() if self.spin.hasFocus() else self.slider.value()
+        if value == self._shown_value:
+            return                       # moved and put back where it was
         self.apply_speed.emit(self.dev_id, str(value))
 
     def set_shown(self, shown: bool) -> None:
@@ -345,7 +371,8 @@ class FanRow(QGroupBox):
         self.own.setChecked(on)
         self.own.blockSignals(False)
 
-    def update_reading(self, dev: dict, mode: str, runtime: dict) -> None:
+    def update_reading(self, dev: dict, mode: str, runtime: dict,
+                       held: dict | None = None) -> None:
         bits = []
         rpms = [r for r in (dev.get("rpms") or []) if r]
         if rpms:
@@ -355,19 +382,25 @@ class FanRow(QGroupBox):
         if dev.get("temp") is not None:
             bits.append(f"{dev['temp']:.0f} °C")
         bits.append({"auto": "firmware", "manual": "set by hand",
-                     "curve": "fan curve", "full": "uncontrolled"}.get(mode, mode))
+                     "curve": "fan curve", "full": "full speed"}.get(mode, mode))
         if runtime.get("why") and runtime["why"] not in ("curve",):
             bits.append(runtime["why"])
+        if held:
+            times = int(held.get("put_back") or 0)
+            bits.append("kept by the service" if not times else
+                        f"kept by the service (put back {times}×)")
         percent = dev.get("percent")
         head = f"{percent}%" if percent is not None else "—"
         self.reading.setText(f"<b>{head}</b>  ·  " + "  ·  ".join(bits))
 
         if self.slider is not None and percent is not None:
-            if not self.slider.isSliderDown() and not self.spin.hasFocus():
+            if not self.slider.isSliderDown() and not self.spin.hasFocus() \
+                    and not self._debounce.isActive():
                 self._settling = True
                 self.slider.setValue(int(percent))
                 self.spin.setValue(int(percent))
                 self._settling = False
+                self._shown_value = int(percent)
 
 
 class SettingsDialog(QDialog):
@@ -929,9 +962,26 @@ class SettingsDialog(QDialog):
         self.curve_device = QComboBox()
         self.curve_device.currentIndexChanged.connect(self._curve_device_changed)
         top.addWidget(self.curve_device, 1)
-        self.curve_enabled = QCheckBox("Run a curve on this fan")
-        self.curve_enabled.toggled.connect(lambda _v: self._mark_curve_dirty())
-        top.addWidget(self.curve_enabled)
+        # Whether it is running is shown, not ticked: a tickbox that had to be
+        # ticked before Apply meant a curve could be drawn, applied and saved
+        # and still never run - which is what "it does not save" turned out
+        # to be.
+        self.curve_state = QLabel("")
+        top.addWidget(self.curve_state)
+        # Up here rather than at the foot of the page: the one button that
+        # makes a curve run should not be below the fold.
+        self.curve_apply = QPushButton("Apply and run")
+        self.curve_apply.setToolTip(
+            "Save this curve and run it on this fan, now and after every "
+            "reboot, until you stop it or set a speed by hand.")
+        self.curve_apply.clicked.connect(lambda: self._save_curve())
+        top.addWidget(self.curve_apply)
+        self.curve_stop = QPushButton("Stop this curve")
+        self.curve_stop.setToolTip(
+            "The fan goes back to the speed you last set by hand, or to the "
+            "firmware if you never set one. The curve itself is kept.")
+        self.curve_stop.clicked.connect(self._stop_curve)
+        top.addWidget(self.curve_stop)
         lay.addLayout(top)
 
         source = QHBoxLayout()
@@ -1038,21 +1088,20 @@ class SettingsDialog(QDialog):
         service = QGroupBox("Where the curve runs")
         sform = QVBoxLayout(service)
         self.curve_service = QCheckBox(
-            "Run curves in the background, as a system service")
+            "Keep the background service running")
         self.curve_service.toggled.connect(self._toggle_curve_service)
         sform.addWidget(self.curve_service)
         self.curve_service_state = _hint("")
         sform.addWidget(self.curve_service_state)
         sform.addWidget(_hint(
-            "The service applies curves whether or not anyone is logged in, and "
-            "hands every fan it touched back to the firmware when it stops — a "
-            "curve daemon that dies must not leave a fan at 20% while the CPU "
-            "cooks."))
+            "The service runs the curves, keeps every speed you set where you "
+            "put it - putting it back if the firmware or anything else moves "
+            "it - and puts it all back after a reboot, whether or not anyone "
+            "logs in. When it stops, every fan a curve was driving goes back to "
+            "the firmware: a service that dies must not leave a fan at 20% while "
+            "the CPU cooks."))
 
         row = QHBoxLayout()
-        self.curve_apply = QPushButton("Apply curve")
-        self.curve_apply.clicked.connect(self._save_curve)
-        row.addWidget(self.curve_apply)
         self.curve_hw = QPushButton("Write it into the firmware")
         self.curve_hw.clicked.connect(self._write_hw_curve)
         row.addWidget(self.curve_hw)
@@ -1068,7 +1117,7 @@ class SettingsDialog(QDialog):
 
     def _mark_curve_dirty(self) -> None:
         self._curve_dirty = True
-        self.curve_apply.setText("Apply curve  •")
+        self.curve_apply.setText("Apply and run  •")
 
     def _curve_limits_changed(self) -> None:
         if self.curve_max.value() < self.curve_min.value():
@@ -1104,12 +1153,11 @@ class SettingsDialog(QDialog):
         self._sync_curve_buttons(snapshot)
 
     def _load_curve_widgets(self, curve: dict) -> None:
-        for widget in (self.curve_enabled, self.curve_hysteresis, self.curve_min,
+        for widget in (self.curve_hysteresis, self.curve_min,
                        self.curve_max, self.curve_ramp_up, self.curve_ramp_down,
                        self.curve_zero, self.curve_spinup, self.curve_spinup_ms,
                        self.curve_source):
             widget.blockSignals(True)
-        self.curve_enabled.setChecked(bool(curve.get("enabled")))
         self.curve_hysteresis.setValue(float(curve["hysteresis"]))
         self.curve_min.setValue(int(curve["min_percent"]))
         self.curve_max.setValue(int(curve["max_percent"]))
@@ -1119,19 +1167,19 @@ class SettingsDialog(QDialog):
         self.curve_spinup.setValue(int(curve["spinup_percent"]))
         self.curve_spinup_ms.setValue(int(curve["spinup_ms"]))
         _set_data(self.curve_source, curve.get("source") or "")
-        for widget in (self.curve_enabled, self.curve_hysteresis, self.curve_min,
+        for widget in (self.curve_hysteresis, self.curve_min,
                        self.curve_max, self.curve_ramp_up, self.curve_ramp_down,
                        self.curve_zero, self.curve_spinup, self.curve_spinup_ms,
                        self.curve_source):
             widget.blockSignals(False)
         self.editor.set_curve(curve)
         self._curve_dirty = False
-        self.curve_apply.setText("Apply curve")
+        self.curve_apply.setText("Apply and run")
 
-    def _collect_curve(self, points: bool = True) -> dict:
+    def _collect_curve(self, points: bool = True, run: bool = True) -> dict:
         curve = curves.default_curve()
         curve.update({
-            "enabled": self.curve_enabled.isChecked(),
+            "enabled": run,
             "source": self.curve_source.currentData() or "",
             "hysteresis": self.curve_hysteresis.value(),
             "min_percent": self.curve_min.value(),
@@ -1146,7 +1194,7 @@ class SettingsDialog(QDialog):
             curve["points"] = self.editor.points()
         return curve
 
-    def _save_curve(self) -> None:
+    def _save_curve(self, run: bool = True) -> None:
         dev_id = self.curve_device.currentData()
         if not dev_id:
             return
@@ -1156,13 +1204,30 @@ class SettingsDialog(QDialog):
             "interval_ms": self.curve_interval.value(),
             "curves": dict(store.get("curves") or {}),
         }
-        payload["curves"][dev_id] = self._collect_curve()
-        self._say("Saving the curve…")
+        payload["curves"][dev_id] = self._collect_curve(run=run)
+        self._say("Saving the curve and starting it…" if run else "Saving the curve…")
+        # The helper starts the service itself when a curve is switched on -
+        # unless it was switched off here, and running a curve is asking for
+        # it back.
         self.priv.run(["curve", "set"], json.dumps(payload))
+        units = self.monitor.snapshot.units
+        if run and units.get("curve", "") not in ("", "not-found") and \
+                units.get("curve_active") != "active":
+            self.priv.run(["daemon", "on"])
         self._curve_dirty = False
-        self.curve_apply.setText("Apply curve")
-        if self.curve_enabled.isChecked() and not self.curve_service.isChecked():
-            self.curve_service.setChecked(True)
+        self.curve_apply.setText("Apply and run")
+
+    def _stop_curve(self) -> None:
+        dev_id = self.curve_device.currentData()
+        if not dev_id:
+            return
+        if self._curve_dirty:
+            # Keep the edits, just do not run them.
+            self._save_curve(run=False)
+        else:
+            self.priv.run(["curve", "enable", dev_id, "off"])
+        self._say("Stopping the curve - the fan goes back to the speed you set, "
+                  "or to the firmware…")
 
     def _toggle_curve_service(self, on: bool) -> None:
         if self.monitor.snapshot.units.get("curve", "") in ("", "not-found"):
@@ -1176,7 +1241,19 @@ class SettingsDialog(QDialog):
         active = self.monitor.snapshot.units.get("curve_active") == "active"
         if on == active:
             return
-        self._say("Starting the curve service…" if on else "Stopping it…")
+        if not on:
+            answer = QMessageBox.question(
+                self, "Stop the background service?",
+                "With it stopped, nothing keeps the speeds you set, nothing puts "
+                "them back after a reboot, and no curve runs. Every fan a curve "
+                "was driving goes back to the firmware.\n\nStop it?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if answer != QMessageBox.Yes:
+                self.curve_service.blockSignals(True)
+                self.curve_service.setChecked(True)
+                self.curve_service.blockSignals(False)
+                return
+        self._say("Starting the background service…" if on else "Stopping it…")
         self.priv.run(["daemon", "on" if on else "off"])
 
     def _write_hw_curve(self) -> None:
@@ -1221,9 +1298,10 @@ class SettingsDialog(QDialog):
         self.boot_state = _hint("")
         sform.addRow("", self.boot_state)
         sform.addRow("", _hint(
-            "The first is this icon, and it is yours alone. The second is a "
-            "system service that runs before anyone logs in, so it needs the "
-            "password once."))
+            "The first is this icon, and it is yours alone. The second is done "
+            "by the background service, which starts before anyone logs in. "
+            "While it runs it also keeps every speed where you set it, putting "
+            "it back if the firmware or anything else moves it."))
         lay.addWidget(start)
 
         menu = QGroupBox("Menu and clicking")
@@ -1273,9 +1351,10 @@ class SettingsDialog(QDialog):
         self.poll_ms.setSuffix(" ms")
         pform.addRow("Ask the helper every", self.poll_ms)
         pform.addRow("", _hint(
-            "Reading is cheap on a motherboard chip and slow on an NVIDIA card, "
-            "where every poll is several nvidia-settings calls. If the machine "
-            "has one, do not go below about two seconds."))
+            "Reading costs next to nothing, NVIDIA cards included now that "
+            "they are read through NVML. Only with an NVIDIA driver older than "
+            "520 is every poll several nvidia-settings calls; there, do not go "
+            "below about two seconds."))
         lay.addWidget(poll)
 
         where = QGroupBox("Where things are kept")
@@ -1395,8 +1474,8 @@ class SettingsDialog(QDialog):
         aform.addRow("", _hint(
             "Fan Control KDE drives motherboard headers through the kernel's own "
             "hwmon interface, AMD cards through amdgpu and its overdrive fan "
-            "curve, and NVIDIA cards through nvidia-settings. It is not "
-            "affiliated with AMD, NVIDIA, Intel or KDE."))
+            "curve, and NVIDIA cards through the driver's NVML library. It is "
+            "not affiliated with AMD, NVIDIA, Intel or KDE."))
         lay.addWidget(about)
         return _scroll(page)
 
@@ -1483,9 +1562,13 @@ class SettingsDialog(QDialog):
     def _on_install_done(self, code: int, out: str, err: str) -> None:
         if code == 0:
             self._say("Installed. Restart the tray to run the new version.")
-            QMessageBox.information(
+            answer = QMessageBox.question(
                 self, "Update",
-                "Installed.\n\nQuit and start the tray again to run it.")
+                "Installed.\n\nThe background service is already running the "
+                "new version. Restart the tray now to run it here as well?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if answer == QMessageBox.Yes:
+                system.relaunch()
         elif code == 126:
             self._say("The password prompt was dismissed; nothing was installed.")
         else:
@@ -1729,7 +1812,7 @@ class SettingsDialog(QDialog):
             answer = QMessageBox.question(
                 self, "Unsaved curve",
                 "The curve on the Curves tab has changes that have not been "
-                "applied. Apply it as well?",
+                "applied. Apply it and run it as well?",
                 QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
                 QMessageBox.Yes)
             if answer == QMessageBox.Cancel:
@@ -1872,7 +1955,8 @@ class SettingsDialog(QDialog):
             row = self._fan_rows.get(dev["id"])
             if row:
                 row.update_reading(dev, snapshot.mode_of(dev),
-                                   snapshot.runtime_for(dev["id"]))
+                                   snapshot.runtime_for(dev["id"]),
+                                   snapshot.held_for(dev["id"]))
 
         units = snapshot.units
         installed = units.get("boot", "") not in ("", "not-found")
@@ -1892,16 +1976,19 @@ class SettingsDialog(QDialog):
         self.curve_service.blockSignals(False)
         enabled_curves = sum(1 for c in (snapshot.curves.get("curves") or {}).values()
                              if c.get("enabled"))
+        kept = len(snapshot.runtime.get("held") or {})
         if not curve_installed:
             self.curve_service_state.setText(
                 "Not installed — this needs the packaged service.")
         elif active:
             self.curve_service_state.setText(
-                f"Running, {enabled_curves} curve(s) switched on.")
+                f"Running: {enabled_curves} curve(s) switched on, "
+                f"{kept} speed(s) being kept.")
         else:
             self.curve_service_state.setText(
-                f"Stopped. {enabled_curves} curve(s) are switched on and will "
-                "start with it.")
+                f"<b>Stopped.</b> Nothing is keeping the speeds you set, nothing "
+                f"puts them back after a reboot, and the {enabled_curves} curve(s) "
+                "switched on are not running.")
 
         self._update_curve_live(snapshot)
         self._sync_curve_buttons(snapshot)
@@ -1959,6 +2046,18 @@ class SettingsDialog(QDialog):
     def _sync_curve_buttons(self, snapshot) -> None:
         dev_id = self.curve_device.currentData()
         dev = snapshot.device(dev_id) if dev_id else None
+        enabled = bool(dev_id and snapshot.curve_for(dev_id).get("enabled"))
+        service = snapshot.units.get("curve_active") == "active"
+        if not dev_id:
+            self.curve_state.setText("")
+        elif enabled and service:
+            self.curve_state.setText("<b style='color:#3fb950'>● running</b>")
+        elif enabled:
+            self.curve_state.setText(
+                "<b style='color:#e3b341'>● on, but the service is stopped</b>")
+        else:
+            self.curve_state.setText("○ not running")
+        self.curve_stop.setEnabled(enabled)
         has_hw = bool((dev or {}).get("features", {}).get("hw_curve"))
         self.curve_hw.setEnabled(has_hw)
         self.curve_hw_reset.setEnabled(has_hw)

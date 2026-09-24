@@ -38,7 +38,7 @@ MODE_TEXT = {
     "auto": "firmware",
     "manual": "set by hand",
     "curve": "fan curve",
-    "full": "uncontrolled",
+    "full": "full speed",
     "hwcurve": "firmware curve",
 }
 
@@ -452,12 +452,15 @@ class FanIcon(QObject):
                 lambda checked: manager.priv.run(
                     ["boot", "on" if checked else "off"]))
             menu.addAction(boot)
-        if units.get("curve", "") not in ("", "not-found"):
-            daemon = QAction("Run fan curves", menu, checkable=True)
-            daemon.setChecked(units.get("curve_active") == "active")
-            daemon.triggered.connect(
-                lambda checked: manager.priv.run(
-                    ["daemon", "on" if checked else "off"]))
+        # The service is what keeps a speed where it was set and runs the
+        # curves. It is on unless somebody switched it off, so it only earns a
+        # line here when it is not running.
+        if units.get("curve", "") not in ("", "not-found") and \
+                units.get("curve_active") not in ("active", "activating", "reloading"):
+            daemon = QAction("Background service is stopped: start it", menu)
+            daemon.setToolTip("Nothing keeps your speeds or runs your curves "
+                              "while it is stopped.")
+            daemon.triggered.connect(lambda: manager.priv.run(["daemon", "on"]))
             menu.addAction(daemon)
 
         menu.addSeparator()

@@ -1,7 +1,7 @@
 %global bin fan-control
 
 Name:           fan-control-kde
-Version:        2.3.1
+Version:        2.4.0
 Release:        1%{?dist}
 Summary:        Tray applet for fan speed, fan curves and temperatures
 
@@ -17,22 +17,23 @@ Requires:       python3-pyside6
 Requires:       polkit
 Requires:       systemd
 # lm_sensors ships the tooling that loads the Super I/O driver in the first
-# place; nvidia-settings is only needed on an NVIDIA machine, so neither is a
-# hard dependency.
+# place, so it is not a hard dependency. NVIDIA cards are driven through the
+# driver's own NVML library and need nothing extra.
 Recommends:     lm_sensors
 Recommends:     pciutils
-Suggests:       nvidia-settings
 
 %description
 Fan Control KDE puts every fan the machine will admit to having in the system
 tray: motherboard headers one by one through the kernel's own hwmon interface,
 AMD cards through amdgpu and its overdrive fan curve, and NVIDIA cards through
-nvidia-settings.
+NVML, with no X display or Coolbits needed.
 
 Set a speed by hand, hand a fan back to its firmware, or draw a fan curve on a
-graph and have a small system service run it - with hysteresis, separate ramp
-rates up and down, a spin-up kick for fans that will not start from stopped, and
-a zero-rpm cut-off. Where the hardware has a curve of its own - the Smart Fan IV
+graph. A small system service keeps every speed where it was set - putting it
+back if the firmware moves it - restores them all after a reboot, and runs the
+curves, with hysteresis, separate ramp rates up and down, a spin-up kick for
+fans that will not start from stopped, and a zero-rpm cut-off. Where the
+hardware has a curve of its own - the Smart Fan IV
 anchor points on an nct6775-family Super I/O, or the overdrive fan curve on an
 RDNA3 or RDNA4 Radeon - the same curve can be written into the firmware so it
 runs with nothing loaded at all.
@@ -79,10 +80,8 @@ install -Dm 0644 polkit/49-fan-control-kde.rules \
     %{buildroot}%{_sysconfdir}/polkit-1/rules.d/49-fan-control-kde.rules
 install -Dm 0644 packaging/%{name}.desktop \
     %{buildroot}%{_datadir}/applications/%{name}.desktop
-install -Dm 0644 systemd/fan-control-kde-restore.service \
-    %{buildroot}%{_prefix}/lib/systemd/system/fan-control-kde-restore.service
-install -Dm 0644 systemd/fan-control-kde-curve.service \
-    %{buildroot}%{_prefix}/lib/systemd/system/fan-control-kde-curve.service
+install -Dm 0644 systemd/fan-control-kde-daemon.service \
+    %{buildroot}%{_prefix}/lib/systemd/system/fan-control-kde-daemon.service
 install -Dm 0644 systemd/fan-control-kde.service \
     %{buildroot}%{_prefix}/lib/systemd/user/fan-control-kde.service
 for s in 48 64 128 256 512; do
@@ -96,14 +95,11 @@ install -Dm 0644 LICENSE %{buildroot}%{_datadir}/licenses/%{name}/LICENSE
 install -Dm 0644 README.md %{buildroot}%{_datadir}/doc/%{name}/README.md
 
 %post
-%systemd_post fan-control-kde-restore.service fan-control-kde-curve.service
-# 1.x called the boot service something else. If it was enabled, carry that
-# choice over rather than silently dropping it, and clear the dangling link the
-# removed unit file leaves behind.
-if [ -L %{_sysconfdir}/systemd/system/graphical.target.wants/fan-tray-restore.service ]; then
-    rm -f %{_sysconfdir}/systemd/system/graphical.target.wants/fan-tray-restore.service
-    systemctl enable fan-control-kde-restore.service >/dev/null 2>&1 || :
-fi
+%systemd_post fan-control-kde-daemon.service
+# The one service that keeps the speeds and runs the curves. This also folds
+# 2.3's two units (and 1.x's one) into it, keeping what was switched on there,
+# and restarts it so an upgrade runs the new code.
+/usr/libexec/fan-control-helper migrate || :
 # an entry from the pre-packaging manual install, if it is still around
 rm -f %{_datadir}/applications/fan-tray.desktop
 touch --no-create %{_datadir}/icons/hicolor &>/dev/null || :
@@ -112,10 +108,10 @@ touch --no-create %{_datadir}/icons/hicolor &>/dev/null || :
 gtk-update-icon-cache %{_datadir}/icons/hicolor &>/dev/null || :
 
 %preun
-%systemd_preun fan-control-kde-restore.service fan-control-kde-curve.service
+%systemd_preun fan-control-kde-daemon.service
 
 %postun
-%systemd_postun fan-control-kde-restore.service fan-control-kde-curve.service
+%systemd_postun fan-control-kde-daemon.service
 
 %files
 %license LICENSE
@@ -128,13 +124,40 @@ gtk-update-icon-cache %{_datadir}/icons/hicolor &>/dev/null || :
 %{_datadir}/applications/%{name}.desktop
 %{_datadir}/polkit-1/actions/io.github.gabrielmf1998.fancontrol.policy
 %{_datadir}/icons/hicolor/*/apps/%{name}.*
-%{_prefix}/lib/systemd/system/fan-control-kde-restore.service
-%{_prefix}/lib/systemd/system/fan-control-kde-curve.service
+%{_prefix}/lib/systemd/system/fan-control-kde-daemon.service
 %{_prefix}/lib/systemd/user/fan-control-kde.service
 %config(noreplace) %{_sysconfdir}/polkit-1/rules.d/49-fan-control-kde.rules
 %dir %{_sysconfdir}/fan-control-kde
 
 %changelog
+* Wed Sep 23 2026 Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com> - 2.4.0-1
+- Speeds and curves survive a reboot, and stay put in between. One service now
+  keeps every speed where it was set, looks at it every two seconds and puts it
+  back when something moves it - on an ASRock B650 board the headers went back
+  to 30% a few seconds after every boot, after the old one-shot restore had
+  already reported success - and says so in the journal each time
+- A curve applied is a curve that runs. "Apply and run" saves it and switches it
+  on; a tickbox that had to be ticked first meant curves were saved and never
+  run. "Stop this curve" hands the fan back to the speed set by hand, or to the
+  firmware, instead of leaving it wherever the curve last had it
+- Opening the settings window no longer changes anything. Building the Fans tab
+  moved the slider of a card whose driver starts at 30%, which sent a speed:
+  the graphics card was put on a fixed speed, that speed was saved over the one
+  chosen before, and its curve was switched off
+- NVIDIA cards are driven through NVML: no X display, no Coolbits, and it works
+  from the service before anyone logs in. nvidia-settings is only the fallback
+  for drivers older than 520
+- A slow ramp checked often no longer stalls short of where the curve is going,
+  and a fan that is already turning is not kicked when a curve takes it over
+- Kubuntu 24.04, KDE neon and Debian 12 are supported: a second .deb carries a
+  PySide6 for distributions that package none, and so does the AppImage
+- openSUSE is recognised by the installer and by the update check, and
+  administrators in the sudo group are not asked for a password on every change
+- The AppImage can show the fans on its own; changing them still needs the
+  helper that a package installs
+- Reading an AMD card's fan back no longer fails a speed that was applied, which
+  also meant it was never saved
+
 * Sun Sep 06 2026 Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com> - 2.3.1-1
 - Naming an icon in "Appearance for" now edits that icon, full stop. It used to
   need a separate tickbox as well, and with the box unticked Apply wrote to the
